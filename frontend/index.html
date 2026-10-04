@@ -186,9 +186,14 @@
     <div class="card">
       <h3 data-i18n="gen.title">Content</h3>
       <p class="hint" data-i18n="gen.hint">The payload to encode. Wrapper and pipeline run before encoding.</p>
-      <label class="field"><span data-i18n="gen.text">Text or URL</span>
+      <label class="field"><span data-i18n="gen.type">Type</span>
+        <select id="payloadType"></select>
+      </label>
+      <div id="fields"></div>
+      <label class="field" id="textField"><span data-i18n="gen.text">Text or URL</span>
         <textarea id="text" placeholder="https://example.com/page?x=1">https://example.com</textarea>
       </label>
+      <div class="out hidden" id="payloadPreview"></div>
       <div class="row">
         <label class="field"><span data-i18n="gen.mode">Mode</span>
           <select id="mode">
@@ -209,6 +214,9 @@
       <label class="check">
         <input type="checkbox" id="fnc1"> <span data-i18n="gen.fnc1">FNC1 prefix (GS1)</span>
       </label>
+      <label class="check">
+        <input type="checkbox" id="optimize" checked> <span data-i18n="gen.optimize">Optimize with mixed-mode segments</span>
+      </label>
 
       <details>
         <summary data-i18n="gen.symbolParams">Symbol parameters</summary>
@@ -223,6 +231,9 @@
             <input type="number" id="mask" placeholder="auto" min="0" max="7">
           </label>
         </div>
+        <label class="check" style="margin-top:6px">
+          <input type="checkbox" id="saAuto"> <span data-i18n="gen.saAuto">Split into structured-append symbols (long content)</span>
+        </label>
       </details>
 
       <details>
@@ -331,6 +342,8 @@
 <div class="toast" id="toast"></div>
 
 <script>
+const $ = (id) => document.getElementById(id);
+
 /* ------------------------------------------------------------------ i18n */
 const I18N = {
   en: {
@@ -338,8 +351,10 @@ const I18N = {
     "tab.generate": "Generate", "tab.inspect": "Inspect",
     "gen.title": "Content",
     "gen.hint": "The payload to encode. Wrapper and pipeline run before encoding.",
-    "gen.text": "Text or URL", "gen.mode": "Mode", "gen.charset": "Charset",
+    "gen.text": "Text or URL", "gen.type": "Type", "gen.mode": "Mode", "gen.charset": "Charset",
     "gen.eci": "ECI designator (optional)", "gen.fnc1": "FNC1 prefix (GS1)",
+    "gen.optimize": "Optimize with mixed-mode segments",
+    "gen.saAuto": "Split into structured-append symbols (long content)",
     "gen.symbolParams": "Symbol parameters", "gen.ec": "EC level",
     "gen.version": "Version", "gen.mask": "Mask",
     "gen.renderStyle": "Render and style", "gen.size": "Size (px)",
@@ -377,8 +392,10 @@ const I18N = {
     "tab.generate": "生成", "tab.inspect": "解析",
     "gen.title": "内容",
     "gen.hint": "待编码的内容。包装与流水线在编码前执行。",
-    "gen.text": "文本或网址", "gen.mode": "模式", "gen.charset": "字符集",
+    "gen.text": "文本或网址", "gen.type": "类型", "gen.mode": "模式", "gen.charset": "字符集",
     "gen.eci": "ECI 编号（可选）", "gen.fnc1": "FNC1 前缀（GS1）",
+    "gen.optimize": "混合模式分段优化（减小尺寸）",
+    "gen.saAuto": "超长内容拆分为结构化追加多张",
     "gen.symbolParams": "符号参数", "gen.ec": "纠错级别",
     "gen.version": "版本", "gen.mask": "掩码",
     "gen.renderStyle": "渲染与样式", "gen.size": "尺寸（像素）",
@@ -427,6 +444,12 @@ function applyI18n() {
     b.classList.toggle("active", b.dataset.lang === LANG));
   $("pipeAvail").textContent = t("gen.pipeAvail");
   // re-render dynamic areas in the current language
+  if (TYPES.length) {
+    const sel = $("payloadType"); const cur = sel.value;
+    [...sel.options].forEach((o, i) => { o.textContent = LANG === "zh" ? TYPES[i].label_zh : TYPES[i].label_en; });
+    sel.value = cur;
+    renderFields();
+  }
   if (lastDecodedJson) renderDecode(lastDecodedJson);
   else if (lastDecodedUrl === "" && $("decOut").dataset.touched !== "1") $("decOut").textContent = t("inspect.empty");
   if ($("verifyBox").dataset.state) setVerifyBadge($("verifyBox").dataset.state);
@@ -437,8 +460,89 @@ function setLang(lang) {
   LANG = lang; localStorage.setItem("qrlang", lang); applyI18n();
 }
 
-/* ------------------------------------------------------------------ utils */
-const $ = (id) => document.getElementById(id);
+/* ---- payload types (advanced usage) ---- */
+let TYPES = [];
+
+async function loadTypes() {
+  const res = await fetch("/api/types");
+  const d = await res.json();
+  TYPES = d.types || [];
+  const sel = $("payloadType");
+  sel.innerHTML = "";
+  TYPES.forEach((tp) => {
+    const o = document.createElement("option");
+    o.value = tp.id;
+    o.textContent = LANG === "zh" ? tp.label_zh : tp.label_en;
+    sel.appendChild(o);
+  });
+  renderFields();
+}
+
+function fieldLabel(f) { return LANG === "zh" ? f.label_zh : f.label_en; }
+
+function renderFields() {
+  const tp = TYPES.find((x) => x.id === $("payloadType").value);
+  const box = $("fields");
+  box.innerHTML = "";
+  $("textField").classList.toggle("hidden", !!tp && tp.id !== "text");
+  if (!tp || tp.id === "text") { updatePreview(); return; }
+  const rows = [];
+  tp.fields.forEach((f) => {
+    const wrap = document.createElement("label");
+    wrap.className = "field";
+    const lab = document.createElement("span");
+    lab.textContent = fieldLabel(f);
+    wrap.appendChild(lab);
+    let input;
+    if (f.kind === "textarea") { input = document.createElement("textarea"); }
+    else if (f.kind === "select") {
+      input = document.createElement("select");
+      (f.options || []).forEach((op) => {
+        const o = document.createElement("option"); o.value = op; o.textContent = op; input.appendChild(o);
+      });
+    } else if (f.kind === "checkbox") { input = document.createElement("input"); input.type = "checkbox"; }
+    else { input = document.createElement("input"); input.type = "text"; }
+    input.dataset.field = f.name;
+    if (f.placeholder) input.placeholder = f.placeholder;
+    if (f.kind === "checkbox") {
+      wrap.style.display = "flex"; wrap.style.alignItems = "center"; wrap.style.gap = "10px";
+      input.style.width = "auto"; wrap.appendChild(input);
+      const s = document.createElement("span"); s.textContent = fieldLabel(f); wrap.innerHTML = "";
+      wrap.appendChild(input); wrap.appendChild(s);
+    } else {
+      if (f.default) input.value = f.default;
+      wrap.appendChild(input);
+    }
+    input.addEventListener("input", debounce(() => { updatePreview(); generate(); }, 450));
+    input.addEventListener("change", () => { updatePreview(); generate(); });
+    box.appendChild(wrap);
+  });
+}
+
+function collectFields() {
+  const f = {};
+  $("fields").querySelectorAll("[data-field]").forEach((el) => {
+    f[el.dataset.field] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  return f;
+}
+
+async function updatePreview() {
+  const type = $("payloadType").value;
+  if (type === "text") { $("payloadPreview").classList.add("hidden"); return; }
+  const res = await fetch("/api/preview", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, fields: collectFields() }),
+  });
+  const d = await res.json();
+  const box = $("payloadPreview");
+  if (d.error) { box.textContent = d.error; box.classList.remove("hidden"); return; }
+  box.textContent = d.text;
+  box.classList.remove("hidden");
+}
+
+$("payloadType").addEventListener("change", () => { renderFields(); generate(); });
+
 let currentImage = "";
 let currentContent = "";
 let logoData = null;
@@ -472,10 +576,14 @@ function readConfig() {
   const verRaw = $("version").value.trim();
   const maskRaw = $("mask").value.trim();
   const eyeColor = $("eye_color").value.toLowerCase();
+  const type = $("payloadType").value;
   return {
     content: {
-      text: $("text").value, mode: $("mode").value, charset: $("charset").value,
+      text: $("text").value, type: type, fields: collectFields(),
+      mode: $("mode").value, charset: $("charset").value,
       eci: eciRaw ? parseInt(eciRaw, 10) : null, fnc1: $("fnc1").checked,
+      optimize: $("optimize").checked,
+      structured_append: $("saAuto").checked ? "auto" : null,
     },
     symbol: {
       ec_level: $("ec").value,
@@ -529,6 +637,34 @@ async function generate() {
     const data = await res.json();
     if (data.error) { toast(data.error); btn.dataset.busy = "0"; btn.textContent = t("gen.generate"); return; }
     const m = data.meta;
+    if (data.multi) {
+      // structured-append: show all parts in a grid
+      currentImage = "";
+      $("qrImg").classList.add("hidden");
+      $("asciiOut").classList.add("hidden");
+      $("metaBox").classList.add("hidden");
+      let host = $("multiBox");
+      if (!host) {
+        host = document.createElement("div"); host.id = "multiBox";
+        host.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;width:100%";
+        $("ph").parentNode.insertBefore(host, $("metaBox"));
+      }
+      host.classList.remove("hidden");
+      host.innerHTML = "";
+      (data.images || []).forEach((src, i) => {
+        const wrap = document.createElement("div");
+        wrap.innerHTML = "<img src='" + src + "' style='width:100%;background:#fff;border-radius:8px'>" +
+          "<div style='text-align:center;color:var(--muted);font-size:.8rem;margin-top:6px'>" +
+          (i + 1) + " / " + data.images.length + "</div>";
+        host.appendChild(wrap);
+      });
+      $("ph").classList.add("hidden");
+      $("dlBox").classList.remove("hidden");
+      setVerifyBadge(data.verify && data.verify.round_trip && data.verify.round_trip.ok ? "ok" : "bad");
+      btn.dataset.busy = "0"; btn.textContent = t("gen.generate");
+      return;
+    }
+    const mb = $("multiBox"); if (mb) { mb.classList.add("hidden"); mb.innerHTML = ""; }
     $("mVer").textContent = m.version; $("mSize").textContent = m.size + "x" + m.size;
     $("mEc").textContent = m.ec_level; $("mMask").textContent = m.mask;
     currentContent = m.content;
@@ -658,7 +794,7 @@ document.addEventListener("paste", (e) => {
 /* ---- initial ---- */
 applyI18n();
 $("decOut").textContent = t("inspect.empty");
-generate();
+loadTypes().then(() => generate());
 </script>
 </body>
 </html>

@@ -242,13 +242,15 @@ class QRResult:
 _MODE_CONST = {"numeric": MODE_NUMERIC, "alphanumeric": MODE_ALPHANUMERIC,
                "byte": MODE_BYTE, "kanji": MODE_KANJI}
 
+_ALNUM_SET = set(ALNUM_CHARSET)
+
 
 def _pick_mode(text: str, mode: str) -> str:
     if mode != "auto":
         return mode
     if text.isdigit():
         return "numeric"
-    if text and all(c in ALNUM_CHARSET for c in text):
+    if text and all(c in _ALNUM_SET for c in text):
         return "alphanumeric"
     try:
         text.encode("shift_jis")
@@ -259,9 +261,64 @@ def _pick_mode(text: str, mode: str) -> str:
     return "byte"
 
 
-def _bits_for_mode(text: str, mode: str, ver: int, charset: str) -> int:
-    seg = _Segment(mode=_MODE_CONST[mode], data=text, charset=charset)
-    return len(_encode_segment(seg, ver))
+def _build_segments(text: str, mode: str, charset: str, optimize: bool) -> list["_Segment"]:
+    """Split text into one or more segments.
+
+    Without optimize: a single segment using the best-fitting mode.
+    With optimize: greedily extract numeric / alphanumeric runs that are long
+    enough to beat byte encoding after paying the segment header, producing a
+    mixed-mode stream (smaller symbol for mixed content).
+    """
+    if mode != "auto":
+        return [_Segment(mode=_MODE_CONST[mode], data=text, charset=charset)]
+    best = _pick_mode(text, "auto")
+    if not optimize or best != "byte":
+        # uniform numeric / alphanumeric / kanji text is already optimal
+        return [_Segment(mode=_MODE_CONST[best], data=text, charset=charset)]
+
+    segs: list[_Segment] = []
+    i, n = 0, len(text)
+    NUM_MIN, ALNUM_MIN = 4, 6  # break-even run lengths vs byte encoding
+    while i < n:
+        if text[i].isdigit():
+            j = i
+            while j < n and text[j].isdigit():
+                j += 1
+            if j - i >= NUM_MIN:
+                segs.append(_Segment(MODE_NUMERIC, text[i:j], charset))
+                i = j
+                continue
+        if text[i] in _ALNUM_SET:
+            j = i
+            while j < n and text[j] in _ALNUM_SET:
+                j += 1
+            if j - i >= ALNUM_MIN:
+                segs.append(_Segment(MODE_ALPHANUMERIC, text[i:j], charset))
+                i = j
+                continue
+        # byte run until the next worthwhile numeric/alnum run
+        j = i + 1
+        while j < n:
+            if text[j].isdigit():
+                k = j
+                while k < n and text[k].isdigit():
+                    k += 1
+                if k - j >= NUM_MIN:
+                    break
+            if text[j] in _ALNUM_SET:
+                k = j
+                while k < n and text[k] in _ALNUM_SET:
+                    k += 1
+                if k - j >= ALNUM_MIN:
+                    break
+            j += 1
+        segs.append(_Segment(MODE_BYTE, text[i:j], charset))
+        i = j
+    return segs or [_Segment(MODE_BYTE, text, charset)]
+
+
+def _total_bits(segs: list["_Segment"], ver: int) -> int:
+    return sum(len(_encode_segment(s, ver)) for s in segs)
 
 
 def make_qr(
@@ -274,6 +331,7 @@ def make_qr(
     eci: Optional[int] = None,
     fnc1: bool = False,
     structured_append: Optional[dict] = None,
+    optimize: bool = True,
 ) -> QRResult:
     """Build a QR matrix.
 
@@ -285,12 +343,16 @@ def make_qr(
     eci       explicit ECI designator (e.g. 26 = UTF-8)
     fnc1      prepend FNC1 (GS1)
     structured_append  {"index":1,"total":2,"parity":0}
+    optimize  split text into mixed-mode segments when it reduces the symbol
     """
     ec = ec.upper()
     if ec not in EC_ORDER:
         raise ValueError(f"unsupported EC level: {ec}")
 
-    real_mode = _pick_mode(text, mode)
+    segs = _build_segments(text, mode, charset, optimize)
+    real_mode = "mixed" if len(segs) > 1 else \
+        {v: k for k, v in _MODE_CONST.items()}[segs[0].mode]
+
     overhead = 0
     if fnc1:
         overhead += 4
@@ -302,14 +364,14 @@ def make_qr(
     if version is None:
         chosen = None
         for v in range(1, 41):
-            if overhead + _bits_for_mode(text, real_mode, v, charset) <= num_data_codewords(v, ec) * 8:
+            if overhead + _total_bits(segs, v) <= num_data_codewords(v, ec) * 8:
                 chosen = v
                 break
         if chosen is None:
             raise ValueError("content too long for QR version 40")
         version = chosen
     else:
-        if overhead + _bits_for_mode(text, real_mode, version, charset) > num_data_codewords(version, ec) * 8:
+        if overhead + _total_bits(segs, version) > num_data_codewords(version, ec) * 8:
             raise ValueError(f"content exceeds capacity of version {version} at level {ec}")
 
     buf = _BitBuf()
@@ -320,8 +382,9 @@ def make_qr(
         buf.append(structured_append.get("index", 0), 4)
         buf.append(structured_append.get("total", 1) - 1, 4)
         buf.append(structured_append.get("parity", 0), 8)
-    seg = _Segment(mode=_MODE_CONST[real_mode], data=text, charset=charset, eci=eci)
-    buf.bits.extend(_encode_segment(seg, version).bits)
+    for k, seg in enumerate(segs):
+        seg.eci = eci if (k == 0 and eci is not None) else None
+        buf.bits.extend(_encode_segment(seg, version).bits)
 
     cap_bits = num_data_codewords(version, ec) * 8
     for _ in range(min(4, cap_bits - len(buf))):
@@ -604,3 +667,31 @@ def _penalty(modules, n: int) -> int:
 
 
 _chosen_mask = 0
+
+
+def split_structured_append(text: str, ec: str = "M", charset: str = "UTF-8",
+                            optimize: bool = True, mode: str = "auto"):
+    """Split text into up to 16 chunks that each fit a version-40 symbol.
+
+    Returns (chunks, params) where params[i] is the structured-append dict for
+    chunk i (shared parity = XOR of all content bytes, per spec).
+    """
+    max_bits = num_data_codewords(40, ec) * 8
+    chunks, cur = [], []
+    for ch in text:
+        cur.append(ch)
+        if _total_bits(_build_segments("".join(cur), mode, charset, optimize), 40) + 20 > max_bits:
+            cur.pop()
+            chunks.append("".join(cur))
+            cur = [ch]
+    if cur:
+        chunks.append("".join(cur))
+    if len(chunks) > 16:
+        raise ValueError("content too long even for 16 structured-append symbols")
+
+    parity = 0
+    for b in text.encode(charset):
+        parity ^= b
+    params = [{"index": i + 1, "total": len(chunks), "parity": parity}
+              for i in range(len(chunks))]
+    return chunks, params

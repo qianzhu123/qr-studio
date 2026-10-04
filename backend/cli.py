@@ -48,8 +48,9 @@ def _report(res: dict):
 
 def cmd_gen(args):
     cfg = {
-        "content": {"text": args.text, "mode": args.mode, "charset": args.charset,
-                    "fnc1": args.fnc1},
+        "content": {"text": args.text or "", "type": args.type,
+                    "fields": json.loads(args.fields) if args.fields else {},
+                    "mode": args.mode, "charset": args.charset, "fnc1": args.fnc1},
         "symbol": {"version": args.version, "ec_level": args.ec, "mask": args.mask},
         "render": {"format": "ascii" if args.ascii else "png",
                    "size_px": args.size, "module_px": args.module,
@@ -132,8 +133,13 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     g = sub.add_parser("gen", help="generate a QR code")
-    g.add_argument("text")
+    g.add_argument("text", nargs="?", default="")
     g.add_argument("-o", "--out", default="qr.png")
+    g.add_argument("--type", default="text",
+                   help="payload type: text|url|vcard|mecard|email|tel|sms|geo|wifi|"
+                        "otpauth|event|sepa|gs1|json|kv")
+    g.add_argument("--fields", default="", help='JSON object of field values, e.g. \'{"ssid":"x"}\'')
+    g.add_argument("--list-types", action="store_true", help="print payload types and exit")
     g.add_argument("--ec", default="M", choices=["L", "M", "Q", "H"])
     g.add_argument("--version", type=int, default=None)
     g.add_argument("--mask", type=int, default=None)
@@ -166,6 +172,12 @@ def main():
     w.set_defaults(func=cmd_watch)
 
     args = p.parse_args()
+    if args.cmd == "gen" and getattr(args, "list_types", False):
+        from qr_payloads import type_schema
+        for tp in type_schema():
+            fields = ", ".join(f["name"] for f in tp["fields"])
+            print(f"{tp['id']:9s} {tp['label_en']:22s} fields: {fields}")
+        return 0
     return args.func(args) or 0
 
 

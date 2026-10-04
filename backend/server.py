@@ -18,6 +18,7 @@ import numpy as np
 
 from build import build_qr  # noqa: E402
 from qr_decode import decode_image, trace_redirects  # noqa: E402
+from qr_payloads import build_payload, type_schema  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND = os.path.join(ROOT, "frontend")
@@ -62,6 +63,8 @@ class Handler(BaseHTTPRequestHandler):
             if os.path.isdir(PROFILES):
                 names = [f[:-5] for f in os.listdir(PROFILES) if f.endswith(".json")]
             return self._json({"profiles": names})
+        if path == "/api/types":
+            return self._json({"types": type_schema()})
         return self._json({"error": "not found"}, 404)
 
     def _file(self, p, ctype):
@@ -83,6 +86,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._generate(body)
         if path == "/api/decode":
             return self._decode(body)
+        if path == "/api/preview":
+            return self._preview(body)
         if path == "/api/trace":
             return self._json({"chain": trace_redirects(body.get("url", ""))})
         if path == "/api/profiles":
@@ -94,16 +99,28 @@ class Handler(BaseHTTPRequestHandler):
             result = build_qr(body)
         except Exception as e:
             return self._json({"error": str(e)}, 400)
-        out = {
-            "meta": result["meta"],
-            "verify": result["verify"],
-        }
-        if body.get("render", {}).get("format", "png") == "png":
+        out = {"meta": result["meta"], "verify": result["verify"]}
+        is_png = body.get("render", {}).get("format", "png") == "png"
+        if result.get("multi"):
+            out["multi"] = True
+            out["images"] = [
+                "data:image/png;base64," + base64.b64encode(i["data"]).decode()
+                for i in result["items"]
+            ]
+        elif is_png:
             out["image"] = "data:image/png;base64," + base64.b64encode(result["data"]).decode()
         else:
             out["data"] = result["data"] if isinstance(result["data"], str) else \
                 result["data"].decode("utf-8", "replace")
         return self._json(out)
+
+    def _preview(self, body):
+        """Build the payload text from fields without rendering (live preview)."""
+        try:
+            text, needs_fnc1 = build_payload(body.get("type", "text"), body.get("fields") or {})
+        except Exception as e:
+            return self._json({"error": str(e)}, 400)
+        return self._json({"text": text, "fnc1": needs_fnc1})
 
     def _decode(self, body):
         img = _load_image(body.get("image", ""))

@@ -31,9 +31,11 @@ parameter surface and keeps every step inspectable.
 | Area | Capability |
 |---|---|
 | Encoding | numeric / alphanumeric / byte / kanji modes, auto mode selection |
+| | mixed-mode segmentation optimization (smaller symbols for mixed content) |
 | | ECI designator, arbitrary charset (UTF-8, GBK, Shift_JIS, ...) |
-| | FNC1 / GS1 prefix, structured append |
+| | FNC1 / GS1 prefix, structured append (multi-symbol split for long content) |
 | | versions 1..40, EC levels L/M/Q/H, all 8 masks |
+| Payload types | text, URL, vCard, MECARD, email, tel, SMS, geo, WiFi, TOTP (otpauth), calendar event, SEPA transfer, GS1 element string, JSON, key=value |
 | Error correction | Reed-Solomon over GF(256), blocks + interleaving per spec |
 | Rendering | PNG (Pillow), SVG (hand-written), ASCII / terminal |
 | Styling | module shapes (square/dot/rounded/smooth), eye shapes, eye color, gradient, embedded logo with ECC-aware knockout |
@@ -76,6 +78,9 @@ against `127.0.0.1`.
 
 ```bash
 python backend/cli.py gen "https://example.com" -o qr.png --ec H
+python backend/cli.py gen --list-types
+python backend/cli.py gen --type wifi --fields '{"ssid":"Net","password":"pw"}'
+python backend/cli.py gen --type vcard --fields '{"first":"Ada","last":"Lovelace"}'
 python backend/cli.py gen "hello" --ascii
 python backend/cli.py gen "data" --shape dot --eye-shape rounded --fg "#111" --bg "#fff"
 python backend/cli.py decode qr.png
@@ -88,8 +93,9 @@ python backend/cli.py watch-clipboard            # decode on clipboard change
 
 ```jsonc
 {
-  "content": { "text": "https://example.com", "mode": "auto",
-               "charset": "UTF-8", "eci": null, "fnc1": false },
+  "content": { "text": "https://example.com", "type": "text", "fields": {},
+               "mode": "auto", "charset": "UTF-8", "eci": null,
+               "fnc1": false, "optimize": true, "structured_append": null },
   "symbol":  { "version": null, "ec_level": "M", "mask": null },
   "render":  { "format": "png", "size_px": 1024, "quiet_zone": 4,
                "fg": "#000000", "bg": "#ffffff",
@@ -106,6 +112,34 @@ The same config produces the same code, every time. `verify.round_trip`
 re-decodes the result and fails loudly if it does not match.
 
 ## Advanced features
+
+### Payload types (advanced usage)
+
+A QR code encodes an arbitrary string; the "advanced" uses are well-known
+formats that a consuming app parses. Pick a type in the GUI (or `--type` on the
+CLI) and the fields are assembled and validated for you:
+
+- `text`, `url`, `json`, `kv`
+- `vcard`, `mecard` (contacts, RFC 6350 / MECARD escaping)
+- `email` (mailto with subject/body), `tel`, `sms`
+- `geo` (latitude/longitude)
+- `wifi` (WPA/WEP/open, hidden SSID, escaping)
+- `otpauth` (TOTP: secret, issuer, algorithm, digits, period)
+- `event` (calendar VEVENT)
+- `sepa` (EPC069-12 credit transfer)
+- `gs1` (GS1 element string; FNC1 is applied automatically)
+
+### Mixed-mode optimization
+
+For mixed content (letters + digits + punctuation), the encoder greedily splits
+the text into numeric / alphanumeric / byte segments to reduce the symbol
+version. Toggle it with the "Optimize" checkbox or `optimize` in the config.
+
+### Structured append
+
+Content too long for one symbol can be split across up to 16 structured-append
+symbols that a reader reassembles (shared parity per spec). Enable the
+"Split into structured-append symbols" checkbox; the GUI shows every part.
 
 ### Nested URL wrapper
 
@@ -150,6 +184,7 @@ only and never renders or executes the target page.
 qr-studio/
   backend/
     qr_encoder.py    from-scratch encoder (RS, masks, format info, interleave)
+    qr_payloads.py   structured payload builders + schema (vCard, WiFi, ...)
     qr_render.py     PNG / SVG / ASCII rendering, styling, logo embedding
     qr_decode.py     multi-engine decode + triage classification + tracing
     qr_pipeline.py   nested wrapper + transform pipeline
