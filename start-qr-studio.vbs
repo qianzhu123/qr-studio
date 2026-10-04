@@ -1,10 +1,18 @@
 ' QR Studio launcher (Windows)
-' Starts the local server in a hidden window, then opens the browser.
-' Double-click this file. Close the server with:  taskkill /IM pythonw.exe /F
+' Double-click to run.
+'
+' Logic:
+'   1. Check whether the server is already listening on the port.
+'   2. If it is running  -> stop that exact process, then restart it.
+'      If it is not running -> start it.
+'   3. Wait for the port, then open the browser.
+'
+' The stop step kills only the PID that owns the port, so unrelated pythonw
+' processes are left alone.
 
 Option Explicit
 
-Dim fso, shell, here, port, url, pyw, candidates, i, req, tries
+Dim fso, shell, here, port, url, pyw, candidates, i, pid
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -27,20 +35,31 @@ For i = 0 To UBound(candidates)
   End If
 Next
 
-' --- if the server is already up, just open the browser ---
-If ServerIsUp(url) Then
-  shell.Run url, 1, False
-  WScript.Quit 0
+' --- 1. is it already running? ---
+pid = PidOnPort(port)
+
+If pid <> "" Then
+  ' --- 2a. running -> stop it ---
+  shell.Run "taskkill /F /PID " & pid, 0, True
+  ' wait until the port is actually free (max ~10s)
+  For i = 1 To 40
+    WScript.Sleep 250
+    If PidOnPort(port) = "" Then Exit For
+  Next
+  If PidOnPort(port) <> "" Then
+    MsgBox "Could not stop the existing server on port " & port & ".", 48, "QR Studio"
+    WScript.Quit 1
+  End If
 End If
 
-' --- launch the server hidden ---
+' --- 2b. start it (fresh) ---
 shell.CurrentDirectory = here
 shell.Run """" & pyw & """ """ & here & "\backend\server.py"" --port " & port, 0, False
 
-' --- wait for the port, then open the browser (max ~20s) ---
-For tries = 1 To 40
+' --- 3. wait for the port, then open the browser (max ~20s) ---
+For i = 1 To 40
   WScript.Sleep 500
-  If ServerIsUp(url) Then
+  If PidOnPort(port) <> "" Then
     shell.Run url, 1, False
     WScript.Quit 0
   End If
@@ -51,16 +70,30 @@ MsgBox "QR Studio did not start in time." & vbCrLf & _
        "  python backend\server.py", 48, "QR Studio"
 WScript.Quit 1
 
-' Return True if the server answers on the given URL.
-Function ServerIsUp(u)
-  Dim x
-  ServerIsUp = False
+
+' Return the PID listening on the given port, or "" if none.
+' Matches netstat -ano lines whose local address ends with :<port>.
+Function PidOnPort(p)
+  Dim exec, line, addr, pos, n, sep
+  PidOnPort = ""
   On Error Resume Next
-  Set x = CreateObject("MSXML2.XMLHTTP")
-  x.Open "GET", u, False
-  x.Send
-  If Err.Number = 0 Then
-    If x.Status = 200 Then ServerIsUp = True
-  End If
+  Set exec = shell.Exec(shell.ExpandEnvironmentStrings("%comspec%") & " /c netstat -ano")
+  Do While Not exec.StdOut.AtEndOfStream
+    line = exec.StdOut.ReadLine
+    If InStr(line, "LISTENING") > 0 Then
+      pos = InStr(line, ":" & p & " ")
+      If pos = 0 Then pos = InStr(line, ":" & p & Chr(9))
+      If pos > 0 Then
+        ' trailing token after the last run of spaces is the PID
+        line = Trim(line)
+        n = Len(line)
+        Do While n > 0 And Mid(line, n, 1) <> " " And Mid(line, n, 1) <> Chr(9)
+          n = n - 1
+        Loop
+        PidOnPort = Trim(Mid(line, n + 1))
+        Exit Do
+      End If
+    End If
+  Loop
   On Error GoTo 0
 End Function
