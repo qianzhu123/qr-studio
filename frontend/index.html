@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Studio</title>
+<style>
+  :root {
+    --bg: #0c0d10;
+    --panel: #14161b;
+    --panel-2: #1a1d23;
+    --line: #262a32;
+    --line-2: #333845;
+    --text: #e8eaed;
+    --muted: #9aa0aa;
+    --dim: #6b7280;
+    --accent: #d7f36b;
+    --accent-ink: #10120a;
+    --danger: #ff6b6b;
+    --ok: #7ee787;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font-family: "Outfit", "Space Grotesk", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  header { padding: 40px 40px 8px; max-width: 1520px; margin: 0 auto; }
+  .brand { display: flex; align-items: baseline; gap: 14px; }
+  .brand h1 {
+    margin: 0; font-size: clamp(2rem, 3.4vw, 3rem); font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .brand .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--accent); }
+  .brand p { margin: 0; color: var(--muted); font-size: 1rem; }
+  .tabs { display: flex; gap: 6px; margin: 26px 40px 0; max-width: 1520px; }
+  .tab {
+    padding: 9px 18px; border: 1px solid var(--line); border-radius: 999px;
+    background: transparent; color: var(--muted); cursor: pointer; font: inherit;
+    transition: all .18s ease;
+  }
+  .tab:hover { border-color: var(--line-2); color: var(--text); }
+  .tab.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+  main { max-width: 1520px; margin: 0 auto; padding: 26px 40px 80px; }
+  .grid { display: grid; grid-template-columns: 460px 1fr; gap: 28px; align-items: start; }
+  @media (max-width: 1080px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 22px;
+  }
+  .card h3 {
+    margin: 0 0 4px; font-size: 1.02rem; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .card .hint { color: var(--dim); font-size: .82rem; margin: 0 0 16px; }
+
+  label.field { display: block; margin-bottom: 14px; }
+  label.field > span { display: block; font-size: .78rem; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .08em; }
+  input[type=text], input[type=number], textarea, select {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font: inherit; font-size: .92rem; outline: none; transition: border .16s;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 74px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  input[type=color] {
+    width: 100%; height: 40px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 4px; cursor: pointer;
+  }
+
+  details { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px; }
+  details > summary {
+    cursor: pointer; color: var(--text); font-size: .88rem; font-weight: 500;
+    list-style: none; padding: 6px 0;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "+ "; color: var(--accent); }
+  details[open] > summary::before { content: "- "; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+    padding: 11px 18px; border-radius: 10px; border: 1px solid var(--line-2);
+    background: transparent; color: var(--text); font: inherit; font-weight: 500;
+    cursor: pointer; transition: all .16s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.06); color: var(--accent-ink); }
+  .btn.full { width: 100%; }
+  .btn.small { padding: 8px 12px; font-size: .84rem; }
+  .actions { display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+
+  .preview {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; min-height: 420px; padding: 30px;
+    background:
+      radial-gradient(1200px 400px at 50% -10%, rgba(215,243,107,.06), transparent 60%),
+      var(--panel);
+  }
+  #qrImg { width: 300px; height: 300px; image-rendering: pixelated; background: #fff; border-radius: 10px; }
+  .preview .ph { color: var(--dim); font-size: .9rem; }
+  .meta {
+    width: 100%; display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 1px; background: var(--line); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+  .meta div { background: var(--panel-2); padding: 12px 14px; }
+  .meta .k { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .meta .v { font-size: 1.05rem; font-weight: 600; margin-top: 3px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px; font-size: .82rem;
+    padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line-2);
+  }
+  .badge.ok { color: var(--ok); border-color: rgba(126,231,135,.35); }
+  .badge.bad { color: var(--danger); border-color: rgba(255,107,107,.35); }
+
+  .drop {
+    border: 1.5px dashed var(--line-2); border-radius: var(--radius);
+    padding: 46px 20px; text-align: center; color: var(--muted);
+    transition: all .18s ease; cursor: pointer;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); color: var(--text); background: rgba(215,243,107,.03); }
+  .out {
+    margin-top: 18px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: .86rem; white-space: pre-wrap; word-break: break-all; color: var(--text);
+  }
+  .out .lbl { color: var(--accent); }
+  .kv { color: var(--muted); }
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--accent); color: var(--accent-ink); padding: 10px 20px;
+    border-radius: 999px; font-weight: 600; font-size: .88rem; opacity: 0;
+    transition: all .25s ease; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .hidden { display: none !important; }
+  .logo-row { display: flex; align-items: center; gap: 12px; }
+  .logo-row img { width: 42px; height: 42px; border-radius: 8px; object-fit: contain; background: #fff; }
+  footer { color: var(--dim); font-size: .82rem; text-align: center; padding: 0 40px 60px; max-width: 1520px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>QR Studio</h1>
+    <p>from-scratch encoder, multi-engine decoder, full control</p>
+  </div>
+</header>
+
+<div class="tabs">
+  <button class="tab active" data-view="gen">Generate</button>
+  <button class="tab" data-view="inspect">Inspect</button>
+</div>
+
+<main>
+  <!-- GENERATE -->
+  <section id="view-gen" class="grid">
+    <div class="card">
+      <h3>Content</h3>
+      <p class="hint">The payload to encode. Wrapper and pipeline run before encoding.</p>
+      <label class="field"><span>Text or URL</span>
+        <textarea id="text" placeholder="https://example.com/page?x=1">https://example.com</textarea>
+      </label>
+      <div class="row">
+        <label class="field"><span>Mode</span>
+          <select id="mode">
+            <option value="auto">auto</option><option value="numeric">numeric</option>
+            <option value="alphanumeric">alphanumeric</option><option value="byte">byte</option>
+            <option value="kanji">kanji</option>
+          </select>
+        </label>
+        <label class="field"><span>Charset</span>
+          <select id="charset">
+            <option>UTF-8</option><option>GBK</option><option>Shift_JIS</option><option>ISO-8859-1</option>
+          </select>
+        </label>
+      </div>
+      <label class="field"><span>ECI designator (optional)</span>
+        <input type="number" id="eci" placeholder="e.g. 26 for UTF-8">
+      </label>
+      <label class="field" style="display:flex;align-items:center;gap:10px">
+        <input type="checkbox" id="fnc1" style="width:auto"> <span style="margin:0;text-transform:none;letter-spacing:0;color:var(--text)">FNC1 prefix (GS1)</span>
+      </label>
+
+      <details>
+        <summary>Symbol parameters</summary>
+        <div class="row-3" style="margin-top:12px">
+          <label class="field"><span>EC level</span>
+            <select id="ec"><option>L</option><option selected>M</option><option>Q</option><option>H</option></select>
+          </label>
+          <label class="field"><span>Version</span>
+            <input type="number" id="version" placeholder="auto" min="1" max="40">
+          </label>
+          <label class="field"><span>Mask</span>
+            <input type="number" id="mask" placeholder="auto" min="0" max="7">
+          </label>
+        </div>
+      </details>
+
+      <details>
+        <summary>Render and style</summary>
+        <div class="row-3" style="margin-top:12px">
+          <label class="field"><span>Size (px)</span><input type="number" id="size_px" value="1024"></label>
+          <label class="field"><span>Quiet zone</span><input type="number" id="quiet_zone" value="4"></label>
+          <label class="field"><span>Format</span>
+            <select id="format"><option>png</option><option>svg</option><option>ascii</option></select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field"><span>Module shape</span>
+            <select id="module_shape"><option>square</option><option>dot</option><option>rounded</option><option>smooth</option></select>
+          </label>
+          <label class="field"><span>Eye shape</span>
+            <select id="eye_shape"><option>square</option><option>dot</option><option>rounded</option><option>smooth</option></select>
+          </label>
+        </div>
+        <div class="row-3">
+          <label class="field"><span>Foreground</span><input type="color" id="fg" value="#000000"></label>
+          <label class="field"><span>Background</span><input type="color" id="bg" value="#ffffff"></label>
+          <label class="field"><span>Eye color</span><input type="color" id="eye_color" value="#000000"></label>
+        </div>
+        <label class="field"><span>Logo (PNG/SVG)</span>
+          <input type="file" id="logoFile" accept="image/*">
+        </label>
+        <div class="logo-row hidden" id="logoRow">
+          <img id="logoPreview" alt="logo">
+          <button class="btn small" id="logoClear">Remove logo</button>
+        </div>
+      </details>
+
+      <details>
+        <summary>Nested wrapper (authorized targets only)</summary>
+        <div style="margin-top:12px">
+          <label class="field"><span>Wrapper template</span>
+            <input type="text" id="wrapTpl" placeholder="https://your.host/r?url={TARGET}&ref={ID}">
+          </label>
+          <div class="row">
+            <label class="field"><span>Ref value</span><input type="text" id="wrapRef" placeholder="a1"></label>
+            <label class="field"><span>Encode</span>
+              <select id="wrapEnc"><option>urlencode</option><option>none</option><option>urlencode_double</option><option>base64</option></select>
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>Transform pipeline (authorized testing only)</summary>
+        <div style="margin-top:12px">
+          <label class="field"><span>Steps, comma separated</span>
+            <input type="text" id="pipe" placeholder="urlencode, double_encode">
+          </label>
+          <p class="hint">Available: urlencode, double_encode, base64, js_scheme, data_uri, intent, wrap_quotes, crlf, zero_width, confusable</p>
+        </div>
+      </details>
+
+      <div class="actions" style="margin-top:18px">
+        <button class="btn primary full" id="genBtn">Generate</button>
+      </div>
+    </div>
+
+    <div class="card preview">
+      <img id="qrImg" class="hidden" alt="QR code">
+      <div class="ph" id="ph">Live preview appears here</div>
+      <div class="meta hidden" id="metaBox">
+        <div><div class="k">Version</div><div class="v" id="mVer">-</div></div>
+        <div><div class="k">Size</div><div class="v" id="mSize">-</div></div>
+        <div><div class="k">EC</div><div class="v" id="mEc">-</div></div>
+        <div><div class="k">Mask</div><div class="v" id="mMask">-</div></div>
+      </div>
+      <div id="verifyBox" class="badge ok hidden"></div>
+      <div class="actions hidden" id="dlBox">
+        <button class="btn small" id="dlPng">Download PNG</button>
+        <button class="btn small" id="dlSvg">Download SVG</button>
+        <button class="btn small" id="copyText">Copy content</button>
+      </div>
+      <div class="out hidden" id="asciiOut"></div>
+    </div>
+  </section>
+
+  <!-- INSPECT -->
+  <section id="view-inspect" class="grid hidden">
+    <div class="card">
+      <h3>Inspect an existing code</h3>
+      <p class="hint">Drop or paste an image. Decoding is local and never opens the target.</p>
+      <div class="drop" id="drop">
+        Drop an image here, paste from clipboard, or click to choose
+        <input type="file" id="file" accept="image/*" class="hidden">
+      </div>
+      <div class="actions" style="margin-top:16px">
+        <button class="btn small" id="pasteBtn">Paste from clipboard</button>
+        <button class="btn small" id="traceBtn" disabled>Trace redirects (HEAD only)</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Result</h3>
+      <p class="hint">Triage: code type, decoder metadata, nested links, redirect chain.</p>
+      <div class="out" id="decOut">No image yet.</div>
+    </div>
+  </section>
+</main>
+
+<footer>Local tool. Nested wrapper and transform pipeline are for self-owned or authorized targets only.</footer>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentImage = "";      // dataURL of the last generated PNG
+let currentContent = "";
+let logoData = null;
+let lastDecodedUrl = "";
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1600);
+}
+
+/* ---- tabs ---- */
+document.querySelectorAll(".tab").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  const v = b.dataset.view;
+  $("view-gen").classList.toggle("hidden", v !== "gen");
+  $("view-inspect").classList.toggle("hidden", v !== "inspect");
+});
+
+/* ---- config assembly ---- */
+function readConfig() {
+  const pipe = $("pipe").value.split(",").map((s) => s.trim()).filter(Boolean)
+    .map((op) => ({ op }));
+  const tpl = $("wrapTpl").value.trim();
+  const eciRaw = $("eci").value.trim();
+  const verRaw = $("version").value.trim();
+  const maskRaw = $("mask").value.trim();
+  const eyeColor = $("eye_color").value.toLowerCase();
+  return {
+    content: {
+      text: $("text").value,
+      mode: $("mode").value,
+      charset: $("charset").value,
+      eci: eciRaw ? parseInt(eciRaw, 10) : null,
+      fnc1: $("fnc1").checked,
+    },
+    symbol: {
+      ec_level: $("ec").value,
+      version: verRaw ? parseInt(verRaw, 10) : null,
+      mask: maskRaw ? parseInt(maskRaw, 10) : null,
+    },
+    render: {
+      format: $("format").value,
+      size_px: parseInt($("size_px").value, 10) || 1024,
+      quiet_zone: parseInt($("quiet_zone").value, 10) || 0,
+      fg: $("fg").value,
+      bg: $("bg").value,
+      module_shape: $("module_shape").value,
+      eye_shape: $("eye_shape").value,
+      eye_color: eyeColor === $("fg").value.toLowerCase() ? null : eyeColor,
+    },
+    logo: logoData ? { data: logoData, scale: 0.22, knockout: true } : null,
+    wrapper: tpl ? {
+      template: tpl,
+      params: $("wrapRef").value ? { ID: $("wrapRef").value } : {},
+      encode: $("wrapEnc").value,
+    } : null,
+    pipeline: pipe,
+    verify: { round_trip: true },
+  };
+}
+
+/* ---- logo ---- */
+$("logoFile").onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { logoData = r.result; $("logoPreview").src = r.result; $("logoRow").classList.remove("hidden"); };
+  r.readAsDataURL(f);
+};
+$("logoClear").onclick = () => { logoData = null; $("logoRow").classList.add("hidden"); $("logoFile").value = ""; };
+
+/* ---- generate ---- */
+async function generate() {
+  $("genBtn").textContent = "Generating...";
+  try {
+    const res = await fetch("/api/generate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readConfig()),
+    });
+    const data = await res.json();
+    if (data.error) { toast(data.error); $("genBtn").textContent = "Generate"; return; }
+    const m = data.meta;
+    $("mVer").textContent = m.version; $("mSize").textContent = m.size + "x" + m.size;
+    $("mEc").textContent = m.ec_level; $("mMask").textContent = m.mask;
+    currentContent = m.content;
+    if (data.image) {
+      currentImage = data.image;
+      $("qrImg").src = data.image; $("qrImg").classList.remove("hidden");
+      $("asciiOut").classList.add("hidden");
+    } else {
+      $("qrImg").classList.add("hidden");
+      $("asciiOut").textContent = data.data; $("asciiOut").classList.remove("hidden");
+    }
+    $("ph").classList.add("hidden");
+    $("metaBox").classList.remove("hidden");
+    $("dlBox").classList.remove("hidden");
+    const rt = data.verify && data.verify.round_trip;
+    const vb = $("verifyBox");
+    if (rt) {
+      vb.className = "badge " + (rt.ok ? "ok" : "bad");
+      vb.textContent = rt.ok ? "Round-trip verified" : "Round-trip failed";
+      vb.classList.remove("hidden");
+    }
+  } catch (e) { toast("request failed"); }
+  $("genBtn").textContent = "Generate";
+}
+$("genBtn").onclick = generate;
+
+/* live regeneration on option change */
+["ec", "mode", "charset", "size_px", "quiet_zone", "format", "module_shape",
+ "eye_shape", "fg", "bg", "eye_color", "wrapEnc"].forEach((id) => {
+  $(id).addEventListener("change", () => { if (currentImage || $("asciiOut").textContent) generate(); });
+});
+$("text").addEventListener("input", debounce(() => generate(), 450));
+["pipe", "wrapTpl", "wrapRef", "eci", "version", "mask"].forEach((id) =>
+  $(id).addEventListener("input", debounce(() => generate(), 550)));
+
+function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
+
+/* ---- downloads ---- */
+$("dlPng").onclick = () => {
+  if (!currentImage) return;
+  const a = document.createElement("a");
+  a.href = currentImage; a.download = "qr-studio.png"; a.click();
+};
+$("dlSvg").onclick = async () => {
+  const cfg = readConfig(); cfg.render.format = "svg";
+  const res = await fetch("/api/generate", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cfg),
+  });
+  const data = await res.json();
+  if (data.data) {
+    const blob = new Blob([data.data], { type: "image/svg+xml" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "qr-studio.svg"; a.click();
+  }
+};
+$("copyText").onclick = () => { navigator.clipboard.writeText(currentContent); toast("content copied"); };
+
+/* ---- inspect ---- */
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = (e) => { const f = e.target.files[0]; if (f) loadFile(f); };
+["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
+$("pasteBtn").onclick = async () => {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const it of items) {
+      const type = it.types.find((t) => t.startsWith("image/"));
+      if (type) { loadDataURL(URL.createObjectURL(await it.getType(type))); return; }
+    }
+    toast("no image in clipboard");
+  } catch { toast("clipboard read blocked"); }
+};
+
+function loadFile(f) {
+  const r = new FileReader();
+  r.onload = () => loadDataURL(r.result);
+  r.readAsDataURL(f);
+}
+async function loadDataURL(dataURL) {
+  $("decOut").textContent = "Decoding...";
+  const res = await fetch("/api/decode", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: dataURL }),
+  });
+  const d = await res.json();
+  if (d.error) { $("decOut").textContent = d.error; return; }
+  lastDecodedUrl = (d.text || "").startsWith("http") ? d.text : "";
+  $("traceBtn").disabled = !lastDecodedUrl;
+  const lines = [];
+  lines.push("<span class='lbl'>kind</span>    " + (d.kind || "-"));
+  lines.push("<span class='lbl'>engine</span>  " + (d.engine || "-"));
+  const meta = Object.entries(d.meta || {}).filter(([, v]) => v !== null && v !== "" && v !== "None");
+  if (meta.length) lines.push("<span class='lbl'>meta</span>    " + JSON.stringify(Object.fromEntries(meta)));
+  lines.push("<span class='lbl'>content</span> " + escapeHtml(d.text || ""));
+  if (d.links && d.links.length > 1) {
+    lines.push("<span class='lbl'>nested links</span>");
+    d.links.slice(1).forEach((l) => lines.push("    -> " + escapeHtml(l)));
+  }
+  $("decOut").innerHTML = lines.join("\n");
+}
+function escapeHtml(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+$("traceBtn").onclick = async () => {
+  if (!lastDecodedUrl) return;
+  $("traceBtn").textContent = "Tracing...";
+  const res = await fetch("/api/trace", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: lastDecodedUrl }),
+  });
+  const d = await res.json();
+  const box = $("decOut");
+  box.innerHTML += "\n<span class='lbl'>redirect chain</span> (HEAD only)\n" +
+    (d.chain || []).map((h) => "    " + JSON.stringify(h)).join("\n");
+  $("traceBtn").textContent = "Trace redirects (HEAD only)";
+};
+
+/* ---- global paste ---- */
+document.addEventListener("paste", (e) => {
+  if ($("view-inspect").classList.contains("hidden")) return;
+  const it = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+  if (it) loadDataURL(URL.createObjectURL(it.getAsFile()));
+});
+
+/* initial */
+generate();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.0
+# Reference implementation used only to cross-check the from-scratch encoder.
+qrcode>=7.4

@@ -1,0 +1,9 @@
+# Core runtime dependencies for qr-studio.
+# The QR encoder itself has no third-party dependency; these power rendering,
+# decoding and triage.
+opencv-python>=4.8
+pillow>=10.0
+numpy>=1.24
+zxing-cpp>=2.2
+# Optional (falls back gracefully if missing):
+# pyzbar
