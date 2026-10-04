@@ -60,6 +60,11 @@ numpy and zxing-cpp power rendering and decoding.
 python backend/server.py            # http://127.0.0.1:8788
 ```
 
+On Windows you can also double-click `start-qr-studio.vbs`: it starts the server
+in a hidden window, waits for the port, and opens the browser. Re-running it is
+safe (it reuses an already-running server instead of starting a second one).
+Stop the server with `taskkill /IM pythonw.exe /F`.
+
 Two views: **Generate** (paste or type content, tune every parameter, watch the
 live preview and round-trip check) and **Inspect** (drop or paste an image to
 decode and triage it). Everything runs locally against `127.0.0.1`.
@@ -152,6 +157,7 @@ qr-studio/
     index.html       single-page UI (Generate + Inspect)
   profiles/          saved config profiles (JSON)
   tests/             encoder equivalence, round-trip, render, pipeline tests
+  start-qr-studio.vbs  Windows one-click launcher
 ```
 
 ## Testing
