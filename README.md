@@ -209,10 +209,26 @@ qr-studio/
     server.py        local HTTP API + static frontend (stdlib only)
   frontend/
     index.html       single-page UI (Generate + Inspect)
+  screenshot/        QR Shot: right-drag screenshot tool with annotation + decode
   profiles/          saved config profiles (JSON)
   tests/             encoder equivalence, round-trip, render, pipeline tests
   start-qr-studio.vbs  Windows one-click launcher
 ```
+
+## QR Shot (screenshot tool)
+
+`screenshot/` holds a small tray utility for capturing and decoding a code
+seen anywhere on screen without opening the web UI:
+
+- **Right-button drag** opens a selection overlay; a plain right click still
+  shows the normal context menu (no mis-trigger).
+- Annotate (rect, arrow, pen, highlight, mosaic, numbering, text), then
+  **Copy / Save / Pin / Decode**.
+- **Decode** runs the local engine and shows type, content and detected
+  symbology in a small card, with an optional HEAD-only redirect trace.
+
+Run `python screenshot/main.py` or double-click `screenshot/start-qr-shot.vbs`.
+See `screenshot/README.md` for details and DPI notes.
 
 ## Testing
 
