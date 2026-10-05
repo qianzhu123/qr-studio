@@ -21,8 +21,23 @@ import threading
 import time
 import ctypes.wintypes as w
 
-user32 = ctypes.windll.user32
+user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.windll.kernel32
+
+LRESULT = ctypes.c_ssize_t
+
+# Correct CFUNCTYPE signatures for 64-bit. Without explicit argtypes, ctypes
+# assumes 32-bit int for the lParam pointer, which overflows and makes
+# CallNextHookEx raise on every event, breaking the hook chain and flooding
+# stderr with "Exception ignored" messages.
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, w.WPARAM, w.LPARAM)
+
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, w.HINSTANCE, w.DWORD]
+user32.SetWindowsHookExW.restype = ctypes.c_void_p
+user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, w.WPARAM, w.LPARAM]
+user32.CallNextHookEx.restype = LRESULT
+user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+user32.UnhookWindowsHookEx.restype = w.BOOL
 
 WH_MOUSE_LL = 14
 WM_MOUSEMOVE = 0x0200
@@ -31,15 +46,10 @@ WM_RBUTTONUP = 0x0205
 WM_RBUTTONDBLCLK = 0x0206
 WM_QUIT = 0x0012
 
-LRESULT = ctypes.c_ssize_t
-
 
 class MSLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [("pt", w.POINT), ("mouseData", w.DWORD), ("flags", w.DWORD),
-                ("time", w.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, w.WPARAM, w.LPARAM)
+                ("time", w.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
 
 
 def set_dpi_aware():
@@ -81,6 +91,10 @@ class MouseHook(threading.Thread):
     # ---- hook procedure: MUST be trivial and fast ----
     def _handler(self, n_code, w_param, l_param):
         try:
+            # HC_ACTION (0) is the only case that carries input; call through
+            # immediately for any negative code.
+            if n_code < 0:
+                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
             if n_code == 0 and w_param in (WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MOUSEMOVE,
                                            WM_RBUTTONDBLCLK):
                 info = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
@@ -103,11 +117,11 @@ class MouseHook(threading.Thread):
                         self._put("up", x, y)
                     else:
                         self._down_pos = (0, 0)
+            # swallow only drag-time events, and only if explicitly requested
+            if self.swallow and self._dragging:
+                return 1
         except Exception:
             pass  # never let an exception escape into the hook
-        # swallow only drag-time events, and only if explicitly requested
-        if self.swallow and self._dragging:
-            return 1
         return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
 
     def _put(self, name, x, y):
