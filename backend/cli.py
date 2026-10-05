@@ -83,12 +83,15 @@ def cmd_decode(args):
             print("clipboard has no image", file=sys.stderr)
             return 1
         bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-        _report(decode_image(bgr))
-        return 0
-    res = _decode_path(args.path)
-    if res is None:
-        return 1
-    _report(res)
+        res = decode_image(bgr)
+    else:
+        res = _decode_path(args.path)
+        if res is None:
+            return 1
+    if getattr(args, "json", False):
+        print(json.dumps(res, ensure_ascii=False))
+    else:
+        _report(res)
     return 0
 
 
@@ -161,6 +164,7 @@ def main():
     d = sub.add_parser("decode", help="decode a QR image")
     d.add_argument("path", nargs="?")
     d.add_argument("--clipboard", action="store_true")
+    d.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     d.set_defaults(func=cmd_decode)
 
     t = sub.add_parser("triage", help="decode + metadata + optional redirect trace")
