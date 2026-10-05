@@ -32,43 +32,11 @@ def _dpr_at(x: int, y: int) -> float:
     """Device pixel ratio of the screen containing a physical point."""
     for s in QtGui.QGuiApplication.screens():
         g = s.geometry()
-        # physical point -> logical
         dpr = s.devicePixelRatio()
         lg = QtCore.QRectF(g.x() * dpr, g.y() * dpr, g.width() * dpr, g.height() * dpr)
         if lg.contains(x, y):
             return dpr
     return QtGui.QGuiApplication.primaryScreen().devicePixelRatio()
-
-
-class HookThread(QtCore.QThread):
-    down = QtCore.Signal(int, int)
-    move = QtCore.Signal(int, int)
-    up = QtCore.Signal(int, int)
-
-    def __init__(self, enabled=True):
-        super().__init__()
-        self.enabled = enabled
-        self._hook = None
-        self._pattern = set()  # track double-click to avoid menu artifacts
-
-    def run(self):
-        self._hook = mouse_hook.MouseHook(self._cb)
-        self._hook.run()
-
-    def _cb(self, name, x, y):
-        if not self.enabled:
-            return False
-        if name == "down":
-            self.down.emit(x, y)
-        elif name == "move":
-            self.move.emit(x, y)
-        elif name == "up":
-            self.up.emit(x, y)
-        return True  # swallow once a drag is in progress
-
-    def stop(self):
-        if self._hook:
-            self._hook.stop()
 
 
 class DecodePopup(QtWidgets.QWidget):
@@ -169,14 +137,50 @@ class App(QtCore.QObject):
         self.q = qapp
         self.overlay = None
         self.popup = None
-        self._dragging = False
         self._enabled = True
         self._build_tray()
-        self.hook = HookThread()
-        self.hook.down.connect(self.on_down)
-        self.hook.move.connect(self.on_move)
-        self.hook.up.connect(self.on_up)
+        # Observe-only hook on its own thread; Qt polls the event queue. The
+        # hook never touches Qt directly, so mouse input can never stall.
+        self.hook = mouse_hook.MouseHook(swallow=False)
         self.hook.start()
+        self._timer = QtCore.QTimer()
+        self._timer.setInterval(15)
+        self._timer.timeout.connect(self._pump)
+        self._timer.start()
+        # Watchdog: never let an overlay stay open more than 60s (self-heal if
+        # a drag is interrupted by a screen-lock, RDP drop, etc.).
+        self._watchdog = QtCore.QTimer()
+        self._watchdog.setInterval(2000)
+        self._watchdog.timeout.connect(self._check_overlay)
+        self._watchdog.start()
+
+    def _check_overlay(self):
+        if self.overlay is not None and self.overlay.isVisible():
+            self._overlay_age = getattr(self, "_overlay_age", 0) + 2
+            if self._overlay_age > 60:
+                self._overlay_age = 0
+                self.overlay.close_overlay()
+        else:
+            self._overlay_age = 0
+
+    def _pump(self):
+        import time
+        now = time.monotonic()
+        while True:
+            try:
+                name, x, y, ts = self.hook.events.get_nowait()
+            except Exception:
+                break
+            if now - ts > 2.0:      # stale backlog (e.g. after a pause): skip
+                continue
+            if not self._enabled:
+                continue
+            if name == "down":
+                self.on_down(x, y)
+            elif name == "move":
+                self.on_move(x, y)
+            elif name == "up":
+                self.on_up(x, y)
 
     # ---- tray ----
     def _build_tray(self):
@@ -210,7 +214,6 @@ class App(QtCore.QObject):
 
     def _set_enabled(self, on):
         self._enabled = on
-        self.hook.enabled = on
         if not on and self.overlay:
             self.overlay.close_overlay()
 
@@ -288,8 +291,10 @@ class App(QtCore.QObject):
 
     def quit(self):
         try:
+            self._timer.stop()
+            self._watchdog.stop()
             self.hook.stop()
-            self.hook.wait(1000)
+            self.hook.join(timeout=1.0)
         except Exception:
             pass
         self.q.quit()

@@ -150,7 +150,7 @@ class Overlay(QtWidgets.QWidget):
 
         self.mode = "select"
         self.color = "#e23b3b"
-        self.width = 3
+        self.pen_w = 3
         self.shapes: list[Shape] = []
         self.sel = QtCore.QRect()
         self._start = None
@@ -203,7 +203,6 @@ class Overlay(QtWidgets.QWidget):
             y = r.top() - self._toolbar.sizeHint().height() - 10
         x = max(4, min(x, self.width() - w - 4))
         self._toolbar.move(x, y)
-
     def begin_drag(self, x, y):
         """Region selection start, driven by the global right-drag hook."""
         self._dragging_region = True
@@ -238,7 +237,7 @@ class Overlay(QtWidgets.QWidget):
             return
         if self.mode == "number":
             self._num += 1
-            self.shapes.append(Shape("number", self.color, self.width, [pos, pos], str(self._num)))
+            self.shapes.append(Shape("number", self.color, self.pen_w, [pos, pos], str(self._num)))
             self.update()
             return
         self._building = True
@@ -251,7 +250,7 @@ class Overlay(QtWidgets.QWidget):
             self._cur = pos
             if self.mode == "pen":
                 if not self.shapes or self.shapes[-1].kind != "pen":
-                    self.shapes.append(Shape("pen", self.color, self.width, [self._start]))
+                    self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start]))
                 self.shapes[-1].pts.append(pos)
             self.update()
 
@@ -259,7 +258,7 @@ class Overlay(QtWidgets.QWidget):
         pos = e.position().toPoint()
         if self._building:
             self._building = False
-            self.shapes.append(Shape(self.mode, self.color, self.width, [self._start, pos]))
+            self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos]))
             self.update()
 
     def keyPressEvent(self, e):
@@ -330,7 +329,7 @@ class Overlay(QtWidgets.QWidget):
         text, ok = QtWidgets.QInputDialog.getText(self, "Text", "Text:")
         if ok and text:
             x, y = self._text_pt.x(), self._text_pt.y()
-            self.shapes.append(Shape("text", self.color, max(2, self.width), [(x, y), (x, y)], text))
+            self.shapes.append(Shape("text", self.color, max(2, self.pen_w), [(x, y), (x, y)], text))
             self.update()
 
 
