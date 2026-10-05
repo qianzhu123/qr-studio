@@ -36,6 +36,7 @@ parameter surface and keeps every step inspectable.
 | | FNC1 / GS1 prefix, structured append (multi-symbol split for long content) |
 | | versions 1..40, EC levels L/M/Q/H, all 8 masks |
 | Payload types | text, URL, vCard, MECARD, email, tel, SMS, geo, WiFi, TOTP (otpauth), calendar event, SEPA transfer, GS1 element string, JSON, key=value |
+| Symbols | QR (from scratch); 1D from scratch: Code 128, Code 39, EAN-13, EAN-8, UPC-A, ITF; 2D via zxing: Data Matrix, Aztec, PDF417 |
 | Error correction | Reed-Solomon over GF(256), blocks + interleaving per spec |
 | Rendering | PNG (Pillow), SVG (hand-written), ASCII / terminal |
 | Styling | module shapes (square/dot/rounded/smooth), eye shapes, eye color, gradient, embedded logo with ECC-aware knockout |
@@ -96,7 +97,7 @@ python backend/cli.py watch-clipboard            # decode on clipboard change
   "content": { "text": "https://example.com", "type": "text", "fields": {},
                "mode": "auto", "charset": "UTF-8", "eci": null,
                "fnc1": false, "optimize": true, "structured_append": null },
-  "symbol":  { "version": null, "ec_level": "M", "mask": null },
+  "symbol":  { "format": "qr", "version": null, "ec_level": "M", "mask": null },
   "render":  { "format": "png", "size_px": 1024, "quiet_zone": 4,
                "fg": "#000000", "bg": "#ffffff",
                "module_shape": "square", "eye_shape": "square",
@@ -141,6 +142,19 @@ Content too long for one symbol can be split across up to 16 structured-append
 symbols that a reader reassembles (shared parity per spec). Enable the
 "Split into structured-append symbols" checkbox; the GUI shows every part.
 
+### Symbols beyond QR
+
+The **Symbol format** selector switches the whole generator:
+
+- `qr` — the from-scratch QR encoder (all options above).
+- `code128`, `code39`, `ean13`, `ean8`, `upca`, `itf` — **from-scratch 1D
+  encoders** (`qr_barcode1d.py`), including EAN/UPC check-digit computation.
+- `datamatrix`, `aztec`, `pdf417` — 2D symbols generated through zxing-cpp.
+
+Decoding, by contrast, is multi-symbology already: the Inspect view reads QR,
+Data Matrix, Aztec, PDF417 and the common 1D codes, and reports the detected
+format in the result metadata.
+
 ### Nested URL wrapper
 
 Reproduce and study the "outer URL embeds an inner target" pattern seen in
@@ -183,7 +197,9 @@ only and never renders or executes the target page.
 ```
 qr-studio/
   backend/
-    qr_encoder.py    from-scratch encoder (RS, masks, format info, interleave)
+    qr_encoder.py    from-scratch QR encoder (RS, masks, format info, interleave)
+    qr_barcode1d.py  from-scratch 1D encoders (Code128/39, EAN/UPC, ITF)
+    qr_symbols.py    symbol registry + non-QR generation (1D native, 2D via zxing)
     qr_payloads.py   structured payload builders + schema (vCard, WiFi, ...)
     qr_render.py     PNG / SVG / ASCII rendering, styling, logo embedding
     qr_decode.py     multi-engine decode + triage classification + tracing

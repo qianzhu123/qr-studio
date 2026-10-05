@@ -19,6 +19,7 @@ import numpy as np
 from build import build_qr  # noqa: E402
 from qr_decode import decode_image, trace_redirects  # noqa: E402
 from qr_payloads import build_payload, type_schema  # noqa: E402
+from qr_symbols import symbol_catalog  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND = os.path.join(ROOT, "frontend")
@@ -65,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"profiles": names})
         if path == "/api/types":
             return self._json({"types": type_schema()})
+        if path == "/api/symbols":
+            return self._json({"symbols": symbol_catalog()})
         return self._json({"error": "not found"}, 404)
 
     def _file(self, p, ctype):

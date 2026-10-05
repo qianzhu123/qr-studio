@@ -16,7 +16,7 @@ from qr_render import render
 DEFAULT_CONFIG = {
     "content": {"text": "", "type": "text", "fields": {}, "mode": "auto",
                 "charset": "UTF-8", "eci": None, "fnc1": False, "structured_append": None},
-    "symbol": {"version": None, "ec_level": "M", "mask": None},
+    "symbol": {"format": "qr", "version": None, "ec_level": "M", "mask": None},
     "render": {"format": "png", "size_px": 1024, "module_px": None,
                "quiet_zone": 4, "fg": "#000000", "bg": "#ffffff",
                "module_shape": "square", "eye_shape": "square",
@@ -67,6 +67,15 @@ def build_qr(config: dict) -> dict:
 
     sa = content.get("structured_append")
     symbol = cfg["symbol"]
+
+    # Non-QR symbologies (1D from scratch, 2D via zxing) short-circuit here.
+    fmt = symbol.get("format", "qr")
+    if fmt and fmt != "qr":
+        from qr_symbols import generate_symbol
+        out = generate_symbol(fmt, text, cfg["render"])
+        out["meta"]["type"] = ptype
+        out["verify"] = out.get("verify") or {"round_trip": None}
+        return out
 
     # Structured append (auto split across multiple symbols) short-circuits to
     # a multi-result build.

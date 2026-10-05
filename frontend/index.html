@@ -186,6 +186,9 @@
     <div class="card">
       <h3 data-i18n="gen.title">Content</h3>
       <p class="hint" data-i18n="gen.hint">The payload to encode. Wrapper and pipeline run before encoding.</p>
+      <label class="field"><span data-i18n="gen.symbol">Symbol format</span>
+        <select id="symbolFormat"></select>
+      </label>
       <label class="field"><span data-i18n="gen.type">Type</span>
         <select id="payloadType"></select>
       </label>
@@ -218,7 +221,7 @@
         <input type="checkbox" id="optimize" checked> <span data-i18n="gen.optimize">Optimize with mixed-mode segments</span>
       </label>
 
-      <details>
+      <details id="detailsQrOnly">
         <summary data-i18n="gen.symbolParams">Symbol parameters</summary>
         <div class="row-3" style="margin-top:12px">
           <label class="field"><span data-i18n="gen.ec">EC level</span>
@@ -351,7 +354,7 @@ const I18N = {
     "tab.generate": "Generate", "tab.inspect": "Inspect",
     "gen.title": "Content",
     "gen.hint": "The payload to encode. Wrapper and pipeline run before encoding.",
-    "gen.text": "Text or URL", "gen.type": "Type", "gen.mode": "Mode", "gen.charset": "Charset",
+    "gen.text": "Text or URL", "gen.type": "Type", "gen.symbol": "Symbol format", "gen.mode": "Mode", "gen.charset": "Charset",
     "gen.eci": "ECI designator (optional)", "gen.fnc1": "FNC1 prefix (GS1)",
     "gen.optimize": "Optimize with mixed-mode segments",
     "gen.saAuto": "Split into structured-append symbols (long content)",
@@ -392,7 +395,7 @@ const I18N = {
     "tab.generate": "生成", "tab.inspect": "解析",
     "gen.title": "内容",
     "gen.hint": "待编码的内容。包装与流水线在编码前执行。",
-    "gen.text": "文本或网址", "gen.type": "类型", "gen.mode": "模式", "gen.charset": "字符集",
+    "gen.text": "文本或网址", "gen.type": "类型", "gen.symbol": "符号格式", "gen.mode": "模式", "gen.charset": "字符集",
     "gen.eci": "ECI 编号（可选）", "gen.fnc1": "FNC1 前缀（GS1）",
     "gen.optimize": "混合模式分段优化（减小尺寸）",
     "gen.saAuto": "超长内容拆分为结构化追加多张",
@@ -450,6 +453,11 @@ function applyI18n() {
     sel.value = cur;
     renderFields();
   }
+  if (SYMBOLS.length) {
+    const sel = $("symbolFormat"); const cur = sel.value;
+    [...sel.options].forEach((o, i) => { o.textContent = LANG === "zh" ? SYMBOLS[i].label_zh : SYMBOLS[i].label_en; });
+    sel.value = cur;
+  }
   if (lastDecodedJson) renderDecode(lastDecodedJson);
   else if (lastDecodedUrl === "" && $("decOut").dataset.touched !== "1") $("decOut").textContent = t("inspect.empty");
   if ($("verifyBox").dataset.state) setVerifyBadge($("verifyBox").dataset.state);
@@ -462,6 +470,28 @@ function setLang(lang) {
 
 /* ---- payload types (advanced usage) ---- */
 let TYPES = [];
+let SYMBOLS = [];
+
+async function loadSymbols() {
+  const res = await fetch("/api/symbols");
+  const d = await res.json();
+  SYMBOLS = d.symbols || [];
+  const sel = $("symbolFormat");
+  sel.innerHTML = "";
+  SYMBOLS.forEach((s) => {
+    const o = document.createElement("option");
+    o.value = s.id; o.textContent = LANG === "zh" ? s.label_zh : s.label_en;
+    sel.appendChild(o);
+  });
+  sel.value = "qr";
+  sel.addEventListener("change", () => { toggleQrOnly(); generate(); });
+}
+
+function toggleQrOnly() {
+  const isQr = $("symbolFormat").value === "qr";
+  document.querySelectorAll("#detailsQrOnly, [data-qr-only]").forEach((el) =>
+    el.classList.toggle("hidden", !isQr));
+}
 
 async function loadTypes() {
   const res = await fetch("/api/types");
@@ -586,6 +616,7 @@ function readConfig() {
       structured_append: $("saAuto").checked ? "auto" : null,
     },
     symbol: {
+      format: $("symbolFormat").value,
       ec_level: $("ec").value,
       version: verRaw ? parseInt(verRaw, 10) : null,
       mask: maskRaw ? parseInt(maskRaw, 10) : null,
@@ -794,7 +825,7 @@ document.addEventListener("paste", (e) => {
 /* ---- initial ---- */
 applyI18n();
 $("decOut").textContent = t("inspect.empty");
-loadTypes().then(() => generate());
+Promise.all([loadSymbols(), loadTypes()]).then(() => { toggleQrOnly(); generate(); });
 </script>
 </body>
 </html>
