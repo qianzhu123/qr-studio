@@ -28,11 +28,9 @@ History note
   uses only a polling watcher and a registered hotkey.
 
 Files
-- hotkey.py      RegisterHotKey wrapper (own thread + event queue)
 - poll_watch.py  right-drag detection by polling (no hook)
 - overlay.py     frozen-screen selection overlay, annotation shapes, pin window
 - main.py        tray app, wiring, decode popup
-- mouse_hook.py  retired low-level hook (kept for reference, not imported)
 - start-qr-shot.vbs   hidden-window launcher
 - stop-qr-shot.vbs    emergency stop
 
