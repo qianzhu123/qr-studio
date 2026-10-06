@@ -162,9 +162,14 @@ FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64]
 class Overlay(QtWidgets.QWidget):
     finished = QtCore.Signal()
 
-    def __init__(self, on_decode, desk: QtGui.QPixmap | None = None):
+    def __init__(self, on_decode, desk: QtGui.QPixmap | None = None, cfg: dict | None = None):
         super().__init__()
         self.on_decode = on_decode
+        try:
+            import config as _cfg
+            self.cfg = cfg if cfg is not None else _cfg.load()
+        except Exception:
+            self.cfg = cfg or {}
         # A real top-level window (NOT Qt.Tool) so it can hold focus and receive
         # left-button annotation events reliably.
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint |
@@ -179,11 +184,11 @@ class Overlay(QtWidgets.QWidget):
         # overlay window exists) so it never captures the overlay itself.
         self.desk = desk if desk is not None else grab_desktop_pixmap()
 
-        self.mode = "rect"          # active annotation tool
-        self.color = "#e23b3b"
-        self.alpha = 255            # 0-255; applied to annotation color
-        self.pen_w = 3
-        self.text_size = 16
+        self.mode = self.cfg.get("default_tool", "rect")   # active annotation tool
+        self.color = self.cfg.get("color", "#e23b3b")
+        self.alpha = self.cfg.get("alpha", 255)            # 0-255
+        self.pen_w = self.cfg.get("pen_w", 3)
+        self.text_size = self.cfg.get("text_size", 16)
         self.shapes: list[Shape] = []
         self.sel = QtCore.QRect()
         self._start = None
@@ -318,7 +323,8 @@ class Overlay(QtWidgets.QWidget):
         # desk is a plain device-pixel image; draw it scaled to the logical
         # overlay rect so it fills the screen at the right size.
         p.drawPixmap(self.rect(), self.desk)
-        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 110))
+        mask = self.cfg.get("mask_alpha", 110)
+        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, mask))
         region = self.sel.normalized()
         if region.isValid() and region.width() > 0:
             p.drawPixmap(region, self.desk, self._rect_device(region))
@@ -329,7 +335,7 @@ class Overlay(QtWidgets.QWidget):
             Shape(self.mode, self.color, self.pen_w, self._preview_pts,
                   "", self.alpha, self.text_size).draw(p, self.desk)
         if region.isValid() and region.width() > 0:
-            p.setPen(QtGui.QPen(QtGui.QColor("#d7f36b"), 1))
+            p.setPen(QtGui.QPen(QtGui.QColor(self.cfg.get("border_color", "#d7f36b")), 1))
             p.drawRect(region)
             self._draw_size_badge(p, region)
 
@@ -469,7 +475,7 @@ class Overlay(QtWidgets.QWidget):
         # Keep a strong reference: a parentless widget with no Python ref is
         # garbage-collected immediately and never appears.
         w = PinWindow(self._render_full(), self.desk, self.vr, self._dpr,
-                      origin, self._reopen_at)
+                      origin, self.cfg, self._reopen_at)
         _PINS.append(w)
         w.show()
         w.raise_()
@@ -597,7 +603,14 @@ class Toolbar(QtWidgets.QWidget):
         grp = QtWidgets.QButtonGroup(self)
         grp.setExclusive(True)
         self.tool_buttons = {}
-        for key, tip, glyph in TOOLS:
+        order = self.o.cfg.get("tools") or [k for k, _, _ in TOOLS]
+        tool_map = {k: (k, tip, glyph) for k, tip, glyph in TOOLS}
+        for key in order:
+            if key not in tool_map:
+                continue
+            _, tip, glyph = tool_map[key]
+            if key in (self.o.cfg.get("hidden_tools") or []):
+                continue
             b = QtWidgets.QToolButton()
             b.setText(glyph)
             b.setToolTip(tip)
@@ -685,83 +698,178 @@ class Toolbar(QtWidgets.QWidget):
          "close": self.o.close_overlay}[k]()
 
 
+class PinButtonBar(QtWidgets.QWidget):
+    """Small toolbar shown over a pinned image on hover: copy / save / close."""
+
+    def __init__(self, pin: "PinWindow"):
+        super().__init__(pin)
+        self.pin = pin
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "QWidget{background:#14161bee;border:1px solid #333845;border-radius:8px;}"
+            "QToolButton{color:#e8eaed;border:none;padding:4px 8px;font-size:14px;border-radius:6px;}"
+            "QToolButton:hover{background:#262a32;}")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(4, 3, 4, 3)
+        lay.setSpacing(2)
+        for key, tip, glyph in [("copy", "Copy", "⧉"), ("save", "Save", "\U0001f4be"),
+                                ("zoom", "Reset zoom", "1:1"), ("close", "Close", "✕")]:
+            b = QtWidgets.QToolButton()
+            b.setText(glyph)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=key: self._action(k))
+            lay.addWidget(b)
+        self.adjustSize()
+        self.hide()
+
+    def reposition(self):
+        w = self.width()
+        self.move(max(4, self.pin.width() - w - 6), 6)
+
+    def _action(self, k):
+        if k == "copy":
+            QtWidgets.QApplication.clipboard().setPixmap(self.pin.pm)
+        elif k == "save":
+            self.pin.save()
+        elif k == "zoom":
+            self.pin.scale = 1.0
+            self.pin._reposition()
+            self.pin.update()
+        elif k == "close":
+            self.pin.close()
+
+
 class PinWindow(QtWidgets.QWidget):
-    """Floating copy of the shot, at its ORIGINAL screen position.
+    """Floating copy of the shot, rendered as a raised 3D card.
 
     - placed exactly where it was captured
-    - wheel zooms about the CURSOR position (the point under the cursor stays
-      put)
-    - right-click reopens the overlay's toolbar (select/annotate again)
+    - wheel zooms about the CURSOR position
+    - right-click reopens the overlay's toolbar
     - left-drag moves, double click (or Esc) closes
+    - a hover button bar gives Copy / Save / 1:1 / Close
     """
 
-    def __init__(self, pixmap, desk, vr, dpr, origin, on_right_click=None):
+    MARGIN = 12      # room for the drop shadow
+
+    def __init__(self, pixmap, desk, vr, dpr, origin, cfg=None, on_right_click=None):
         super().__init__()
         self.pm = pixmap                 # device-pixel crop, dpr = 1.0
-        self.desk = desk                 # frozen desktop (device px)
+        self.desk = desk
         self.scale = 1.0
         self._dpr = dpr or 1.0
         self._vr = vr
         self._origin = origin            # logical screen point of the capture
         self._on_right = on_right_click
+        if cfg is None:
+            try:
+                import config as _cfg
+                cfg = _cfg.load()
+            except Exception:
+                cfg = {}
+        self.cfg = cfg
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint |
                             QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.setStyleSheet("PinWindow{border:1px solid #d7f36b;background:#10120a;}")
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        try:
+            self.setWindowOpacity(max(0.3, min(1.0, cfg.get("pin_opacity", 100) / 100.0)))
+        except Exception:
+            pass
         self._drag = None
         self._show_zoom = False
         self._zoom_timer = QtCore.QTimer(self)
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.timeout.connect(self._hide_zoom)
+        self._bar = PinButtonBar(self)
+        self.setMouseTracking(True)
         self._reposition()
 
-    def _hide_zoom(self):
-        self._show_zoom = False
-        self.update()
+    # ---- geometry ----
+    def _content_size(self):
+        w = max(16, int(self.pm.width() / self._dpr * self.scale))
+        h = max(16, int(self.pm.height() / self._dpr * self.scale))
+        return w, h
 
     def _logical_size(self):
-        return max(16, int(self.pm.width() / self._dpr * self.scale)), \
-               max(16, int(self.pm.height() / self._dpr * self.scale))
+        w, h = self._content_size()
+        m = self.MARGIN
+        return w + 2 * m, h + 2 * m
 
     def _reposition(self):
         w, h = self._logical_size()
         self.resize(w, h)
-        self.move(self._origin)
+        self.move(self._origin.x() - self.MARGIN, self._origin.y() - self.MARGIN)
+        if self._bar:
+            self._bar.reposition()
 
+    def _content_rect(self):
+        return QtCore.QRect(self.MARGIN, self.MARGIN,
+                            self.width() - 2 * self.MARGIN, self.height() - 2 * self.MARGIN)
+
+    # ---- paint ----
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-        p.drawPixmap(self.rect(), self.pm)
+        rect = self._content_rect()
+        # drop shadow -> raised card look
+        if self.cfg.get("pin_shadow", True):
+            for i in range(1, 10):
+                p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 26), 1))
+                p.drawRoundedRect(rect.adjusted(-i, i, i, i), 6, 6)
+        p.setPen(QtGui.QPen(QtGui.QColor(self.cfg.get("border_color", "#d7f36b")), 1))
+        p.setBrush(QtGui.QColor("#10120a"))
+        p.drawRoundedRect(rect, 6, 6)
+        p.drawPixmap(rect, self.pm)
         if self._show_zoom:
             pct = f"{int(round(self.scale * 100))}%"
             p.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Bold))
             fm = QtGui.QFontMetrics(p.font())
             tw = fm.horizontalAdvance(pct) + 16
             th = fm.height() + 6
-            pad = 8
-            rect = QtCore.QRect(self.width() - tw - pad, pad, tw, th)
+            zr = QtCore.QRect(rect.right() - tw - 6, rect.top() + 6, tw, th)
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(QtGui.QColor(0, 0, 0, 170))
-            p.drawRoundedRect(rect, 6, 6)
+            p.drawRoundedRect(zr, 6, 6)
             p.setPen(QtGui.QColor("#e8eaed"))
-            p.drawText(rect, QtCore.Qt.AlignCenter, pct)
+            p.drawText(zr, QtCore.Qt.AlignCenter, pct)
 
+    def _hide_zoom(self):
+        self._show_zoom = False
+        self.update()
+
+    # ---- hover / buttons ----
+    def enterEvent(self, e):
+        self._bar.reposition()
+        self._bar.show()
+        self._bar.raise_()
+
+    def leaveEvent(self, e):
+        self._bar.hide()
+
+    def save(self):
+        import time as _t
+        im = self.pm.toImage()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save", os.path.expanduser(f"~/shot-{int(_t.time())}.png"), "PNG (*.png)")
+        if path:
+            im.save(path, "PNG")
+
+    # ---- input ----
     def wheelEvent(self, e):
         step = 1.12 if e.angleDelta().y() > 0 else 1 / 1.12
         new_scale = max(0.2, min(8.0, self.scale * step))
         if abs(new_scale - self.scale) < 1e-6:
             return
-        # keep the point under the cursor fixed
         cur = e.globalPosition().toPoint()
-        rel_x = (cur.x() - self.x()) / max(1, self.width())
-        rel_y = (cur.y() - self.y()) / max(1, self.height())
+        w0, h0 = self._content_size()
+        rel_x = (cur.x() - (self.x() + self.MARGIN)) / max(1, w0)
+        rel_y = (cur.y() - (self.y() + self.MARGIN)) / max(1, h0)
         self.scale = new_scale
-        w, h = self._logical_size()
-        new_x = int(cur.x() - rel_x * w)
-        new_y = int(cur.y() - rel_y * h)
-        self.resize(w, h)
+        w1, h1 = self._content_size()
+        new_x = int(cur.x() - rel_x * w1) - self.MARGIN
+        new_y = int(cur.y() - rel_y * h1) - self.MARGIN
+        self.resize(self.width() - w0 + w1, self.height() - h0 + h1)
         self.move(new_x, new_y)
-        # show the zoom percentage briefly, hide when idle
+        self._bar.reposition()
         self._show_zoom = True
         self._zoom_timer.start(900)
         self.update()
@@ -771,22 +879,26 @@ class PinWindow(QtWidgets.QWidget):
         if e.button() == QtCore.Qt.RightButton:
             self._reopen()
             return
-        self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, e):
-        if self._drag is not None and e.buttons() & QtCore.Qt.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._drag)
+        if e.buttons() & QtCore.Qt.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._grab_delta(e))
+            self._bar.reposition()
+
+    def _grab_delta(self, e):
+        if not hasattr(self, "_delta"):
+            self._delta = e.position().toPoint()
+        return self._delta
 
     def mouseReleaseEvent(self, e):
-        self._drag = None
+        if hasattr(self, "_delta"):
+            del self._delta
 
     def mouseDoubleClickEvent(self, e):
         self.close()
 
     def _reopen(self):
-        """Re-show the overlay at this pin's origin so the user can annotate."""
         if self._on_right:
-            self._origin  # unchanged
             self._on_right(self._origin.x(), self._origin.y())
         self.close()
 

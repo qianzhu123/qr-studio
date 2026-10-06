@@ -32,6 +32,67 @@ except Exception:
     decode_image = trace_redirects = None
 
 OVERLAY_TIMEOUT_MS = 45000      # self-close a stuck overlay
+QUIT_HOTKEY = os.environ.get("QR_SHOT_QUIT_HOTKEY", "Ctrl+Alt+Q")
+
+
+# --------------------------------------------------------------------------
+# Minimal global hotkey (RegisterHotKey only - no hook, cannot stall input)
+# --------------------------------------------------------------------------
+
+import ctypes.wintypes as _w  # noqa: E402
+import threading  # noqa: E402
+import queue as _queue  # noqa: E402
+
+_MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_WIN, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
+_WM_HOTKEY, _WM_QUIT = 0x0312, 0x0012
+
+
+def _parse_hotkey(combo):
+    mods, vk = _MOD_NOREPEAT, None
+    for part in combo.replace(" ", "").split("+"):
+        p = part.lower()
+        if p in ("ctrl", "control"):
+            mods |= _MOD_CONTROL
+        elif p == "alt":
+            mods |= _MOD_ALT
+        elif p == "shift":
+            mods |= _MOD_SHIFT
+        elif p in ("win", "meta"):
+            mods |= _MOD_WIN
+        elif len(p) == 1:
+            vk = ord(p.upper())
+        elif p.startswith("f") and p[1:].isdigit():
+            vk = 0x6F + int(p[1:])
+    return mods, vk
+
+
+class QuitHotkey(threading.Thread):
+    """Registers a global hotkey that quits the app. No hook, no risk."""
+
+    def __init__(self, combo=QUIT_HOTKEY):
+        super().__init__(daemon=True)
+        self.combo = combo
+        self.fired = _queue.Queue(maxsize=8)
+        self._tid = 0
+
+    def run(self):
+        u = ctypes.windll.user32
+        self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        mods, vk = _parse_hotkey(self.combo)
+        if vk is None or not u.RegisterHotKey(None, 2, mods, vk):
+            return
+        msg = _w.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == _WM_HOTKEY:
+                try:
+                    self.fired.put_nowait(True)
+                except Exception:
+                    pass
+        u.UnregisterHotKey(None, 2)
+
+    def stop(self):
+        if self._tid:
+            ctypes.windll.user32.PostThreadMessageW(self._tid, _WM_QUIT, 0, 0)
 
 
 def set_dpi_aware():
@@ -150,6 +211,20 @@ class App(QtCore.QObject):
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
+        # quit hotkey (the reliable way to stop a background instance)
+        self.quit_hotkey = QuitHotkey()
+        self.quit_hotkey.start()
+        self._hk_timer = QtCore.QTimer()
+        self._hk_timer.setInterval(200)
+        self._hk_timer.timeout.connect(self._poll_quit_hotkey)
+        self._hk_timer.start()
+
+    def _poll_quit_hotkey(self):
+        try:
+            self.quit_hotkey.fired.get_nowait()
+        except Exception:
+            return
+        self.quit()
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -238,13 +313,18 @@ class App(QtCore.QObject):
         menu = QtWidgets.QMenu()
         menu.addAction("Capture now (or right-drag)", self.capture)
         menu.addAction("Decode from clipboard", self.decode_clipboard)
+        menu.addAction("Settings...", self._open_settings)
         self.act_pause = menu.addAction("Pause watching")
         self.act_pause.setCheckable(True)
         self.act_pause.triggered.connect(lambda on: self.watcher.set_enabled(not on))
         menu.addSeparator()
-        menu.addAction("Quit", self.quit)
+        menu.addAction(f"Quit  ({QUIT_HOTKEY})", self.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
+
+    def _open_settings(self):
+        from settings_app import SettingsDialog
+        SettingsDialog().exec()
 
     def _make_icon(self):
         pm = QtGui.QPixmap(64, 64)
@@ -314,6 +394,8 @@ class App(QtCore.QObject):
     def quit(self):
         try:
             self._overlay_timer.stop()
+            self._hk_timer.stop()
+            self.quit_hotkey.stop()
             self.watcher.set_enabled(False)
         except Exception:
             pass

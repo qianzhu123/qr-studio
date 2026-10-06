@@ -1,6 +1,6 @@
-' QR Shot launcher (Windows)
-' Starts the right-drag screenshot tool in a hidden window.
-' Right-drag on screen to capture. Quit from the tray icon.
+' QR Shot launcher (Windows) - runs in the BACKGROUND (no console window).
+' Right-drag to capture. Quit with Ctrl+Alt+Q or the tray icon.
+' Settings: tray icon -> Settings, or run settings_app.py.
 
 Option Explicit
 Dim fso, shell, here, pyw, candidates, i
