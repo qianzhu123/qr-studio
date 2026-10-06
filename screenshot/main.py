@@ -157,12 +157,31 @@ class App(QtCore.QObject):
 
     # ---- right-drag -> overlay ----
     def _logical(self, x, y):
-        dpr = 1.0
+        """Physical cursor (x, y) -> overlay-local LOGICAL coordinates.
+
+        Must test containment against each screen's PHYSICAL rect
+        (geometry * dpr), because GetCursorPos returns device pixels while
+        Qt geometry is in logical pixels. Mixing the two made the lower part
+        of a scaled screen fall outside every screen and break selection.
+        """
+        vr = self.overlay.vr if self.overlay else None
         for s in QtGui.QGuiApplication.screens():
-            if s.geometry().contains(x, y):
-                dpr = s.devicePixelRatio() or 1.0
-                break
-        return int(x / dpr), int(y / dpr)
+            g = s.geometry()
+            dpr = s.devicePixelRatio() or 1.0
+            phys = QtCore.QRect(int(g.x() * dpr), int(g.y() * dpr),
+                                int(g.width() * dpr), int(g.height() * dpr))
+            if phys.contains(x, y):
+                lx, ly = x / dpr, y / dpr
+                if vr:
+                    lx -= vr.left()
+                    ly -= vr.top()
+                return int(lx), int(ly)
+        dpr = QtGui.QGuiApplication.primaryScreen().devicePixelRatio() or 1.0
+        lx, ly = x / dpr, y / dpr
+        if vr:
+            lx -= vr.left()
+            ly -= vr.top()
+        return int(lx), int(ly)
 
     def on_down(self, x, y):
         if self.overlay is not None and self.overlay.isVisible():

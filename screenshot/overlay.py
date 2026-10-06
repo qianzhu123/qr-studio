@@ -223,6 +223,10 @@ class Overlay(QtWidgets.QWidget):
             return
         pos = e.position().toPoint()
 
+        # while a right-drag is selecting, ignore left clicks entirely
+        if self._hooked:
+            return
+
         if not self.sel.isValid() or self.sel.isNull():
             self._selecting = True
             self._start = pos
@@ -230,10 +234,9 @@ class Overlay(QtWidgets.QWidget):
             self.update()
             return
 
-        # click outside the selection hides the toolbar
+        # click outside the selection -> pin the shot to the screen
         if not self.sel.contains(pos):
-            if self._toolbar:
-                self._toolbar.hide()
+            self.do_pin()
             return
 
         if self.mode == "text":
