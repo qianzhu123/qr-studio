@@ -153,7 +153,7 @@ TOOLS = [
 class Overlay(QtWidgets.QWidget):
     finished = QtCore.Signal()
 
-    def __init__(self, on_decode):
+    def __init__(self, on_decode, desk: QtGui.QPixmap | None = None):
         super().__init__()
         self.on_decode = on_decode
         # A real top-level window (NOT Qt.Tool) so it can hold focus and receive
@@ -166,7 +166,9 @@ class Overlay(QtWidgets.QWidget):
         self.setCursor(QtCore.Qt.CrossCursor)
         self.vr = virtual_rect()
         self.setGeometry(self.vr)
-        self.desk = grab_desktop_pixmap()
+        # desk is grabbed ONCE by the caller (at hotkey/trigger time, BEFORE this
+        # overlay window exists) so it never captures the overlay itself.
+        self.desk = desk if desk is not None else grab_desktop_pixmap()
 
         self.mode = "rect"          # active annotation tool
         self.color = "#e23b3b"
@@ -180,6 +182,7 @@ class Overlay(QtWidgets.QWidget):
         self._hooked = False         # True while a hook-driven right-drag is active
         self._toolbar = None         # created after first selection
         self._dpr = display_dpr()
+        self.reopen_handler = None   # set by the app: handler(overlay, x, y)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -402,15 +405,50 @@ class Overlay(QtWidgets.QWidget):
         bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
         self.on_decode(bgr, pm)
 
+    def reset_selection(self):
+        """Clear the current selection and annotations (used after a pin
+        reopens the overlay)."""
+        self.sel = QtCore.QRect()
+        self.shapes = []
+        self._num = 0
+        self._selecting = False
+        self._building = False
+        self._hooked = False
+        if self._toolbar:
+            self._toolbar.hide()
+        self.update()
+
     def do_pin(self):
         global _PINS
+        # Pin exactly where it was captured: origin = selection top-left in
+        # screen logical coordinates (overlay-local + virtual-rect origin).
+        r = self.sel.normalized()
+        origin = self.vr.topLeft() + r.topLeft()
         # Keep a strong reference: a parentless widget with no Python ref is
         # garbage-collected immediately and never appears.
-        w = PinWindow(self._render_full())
+        w = PinWindow(self._render_full(), self.desk, self.vr, self._dpr,
+                      origin, self._reopen_at)
         _PINS.append(w)
         w.show()
         w.raise_()
         self.close_overlay()
+
+    def _reopen_at(self, x, y):
+        """Called by a pinned image: re-show the overlay a fresh to select
+        again. Delegates to the app handler when present."""
+        if self.reopen_handler is not None:
+            self.reopen_handler(x, y)
+            return
+        self.reset_selection()
+        self.show()
+        self._pending_click = (x, y)
+        QtCore.QTimer.singleShot(0, self._auto_begin)
+
+    def _auto_begin(self):
+        pt = getattr(self, "_pending_click", None)
+        if pt is not None:
+            self._pending_click = None
+            self.begin_drag(*pt)
 
     def close_overlay(self):
         self._toolbar.hide()
@@ -472,52 +510,68 @@ class Toolbar(QtWidgets.QWidget):
 
 
 class PinWindow(QtWidgets.QWidget):
-    """Floating thumbnail of the shot. Drag to move, wheel to zoom, double
-    click (or Esc) to close. Sized at 1:1 for the current screen's DPR."""
+    """Floating copy of the shot, at its ORIGINAL screen position.
 
-    def __init__(self, pixmap: QtGui.QPixmap):
+    - placed exactly where it was captured
+    - wheel zooms about the CURSOR position (the point under the cursor stays
+      put)
+    - right-click reopens the overlay's toolbar (select/annotate again)
+    - left-drag moves, double click (or Esc) closes
+    """
+
+    def __init__(self, pixmap, desk, vr, dpr, origin, on_right_click=None):
         super().__init__()
-        self.pm = pixmap                 # plain device-pixel image, dpr = 1.0
+        self.pm = pixmap                 # device-pixel crop, dpr = 1.0
+        self.desk = desk                 # frozen desktop (device px)
         self.scale = 1.0
+        self._dpr = dpr or 1.0
+        self._vr = vr
+        self._origin = origin            # logical screen point of the capture
+        self._on_right = on_right_click
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint |
                             QtCore.Qt.Tool)
-        self.setStyleSheet("PinWindow{border:1px solid #d7f36b;background:#10120a;}")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self._dpr = self._screen_dpr()
-        self._apply_size()
+        self.setStyleSheet("PinWindow{border:1px solid #d7f36b;background:#10120a;}")
         self._drag = None
-        self._place_near_cursor()
+        self._reposition()
 
-    def _screen_dpr(self):
-        s = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos()) or \
-            QtGui.QGuiApplication.primaryScreen()
-        return (s.devicePixelRatio() if s else 1.0) or 1.0
+    def _logical_size(self):
+        return max(16, int(self.pm.width() / self._dpr * self.scale)), \
+               max(16, int(self.pm.height() / self._dpr * self.scale))
 
-    def _apply_size(self):
-        diw = self.pm.width() / self._dpr
-        dih = self.pm.height() / self._dpr
-        self.resize(max(16, int(diw * self.scale)), max(16, int(dih * self.scale)))
-
-    def _place_near_cursor(self):
-        p = QtGui.QCursor.pos()
-        s = QtGui.QGuiApplication.screenAt(p) or QtGui.QGuiApplication.primaryScreen()
-        g = s.availableGeometry()
-        x = min(p.x() + 12, g.right() - self.width() - 8)
-        y = min(p.y() + 12, g.bottom() - self.height() - 8)
-        self.move(max(g.left() + 8, x), max(g.top() + 8, y))
+    def _reposition(self):
+        w, h = self._logical_size()
+        self.resize(w, h)
+        self.move(self._origin)
 
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-        p.drawPixmap(self.rect(), self.pm)   # scale device image to the widget
+        p.drawPixmap(self.rect(), self.pm)
 
     def wheelEvent(self, e):
-        if e.modifiers() & QtCore.Qt.ControlModifier or e.angleDelta().y():
-            self.scale = max(0.2, min(8.0, self.scale * (1.12 if e.angleDelta().y() > 0 else 0.89)))
-            self._apply_size()
-            e.accept()
+        step = 1.12 if e.angleDelta().y() > 0 else 1 / 1.12
+        new_scale = max(0.2, min(8.0, self.scale * step))
+        if abs(new_scale - self.scale) < 1e-6:
+            return
+        # keep the point under the cursor fixed
+        cur = e.globalPosition().toPoint()
+        rel_x = (cur.x() - self.x()) / max(1, self.width())
+        rel_y = (cur.y() - self.y()) / max(1, self.height())
+        old_w, old_h = self.width(), self.height()
+        self.scale = new_scale
+        w, h = self._logical_size()
+        new_x = int(cur.x() - rel_x * w)
+        new_y = int(cur.y() - rel_y * h)
+        self.resize(w, h)
+        self.move(new_x, new_y)
+        self.update()
+        e.accept()
 
     def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.RightButton:
+            self._reopen()
+            return
         self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, e):
@@ -528,6 +582,13 @@ class PinWindow(QtWidgets.QWidget):
         self._drag = None
 
     def mouseDoubleClickEvent(self, e):
+        self.close()
+
+    def _reopen(self):
+        """Re-show the overlay at this pin's origin so the user can annotate."""
+        if self._on_right:
+            self._origin  # unchanged
+            self._on_right(self._origin.x(), self._origin.y())
         self.close()
 
     def keyPressEvent(self, e):

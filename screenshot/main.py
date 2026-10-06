@@ -184,12 +184,24 @@ class App(QtCore.QObject):
         return int(lx), int(ly)
 
     def on_down(self, x, y):
+        # Skip a drag that starts on top of a pinned image so the pin can
+        # receive the click (right-click reopens the toolbar, double-click
+        # closes). This is not a hook, just a geometric check.
+        if self._point_in_pin(x, y):
+            return
         if self.overlay is not None and self.overlay.isVisible():
             return
         self.capture()
         lx, ly = self._logical(x, y)
         self.overlay.begin_drag(lx, ly)
         self._overlay_timer.start(OVERLAY_TIMEOUT_MS)
+
+    def _point_in_pin(self, x, y):
+        import overlay as _ov
+        for w in list(_ov._PINS):
+            if w.isVisible() and w.frameGeometry().contains(x, y):
+                return True
+        return False
 
     def on_move(self, x, y):
         if self.overlay and self.overlay.isVisible():
@@ -234,9 +246,23 @@ class App(QtCore.QObject):
     def capture(self):
         if self.overlay is not None and self.overlay.isVisible():
             self.overlay.close_overlay()
-        self.overlay = Overlay(self.handle_decode)
+        # Grab the desktop ONCE, before the overlay window exists, so the frozen
+        # image never contains the overlay itself.
+        import overlay as _ov
+        from overlay import Overlay as _Overlay
+        desk = _ov.grab_desktop_pixmap()
+        self.overlay = _Overlay(self.handle_decode, desk=desk)
+        self.overlay.reopen_handler = self._reopen_overlay
         self.overlay.finished.connect(self._on_overlay_done)
         self.overlay.show()
+
+    def _reopen_overlay(self, x, y):
+        """A pinned image was right-clicked: open a fresh overlay to select
+        again, starting a new drag at that point."""
+        self.capture()
+        lx, ly = self._logical(x, y)
+        self.overlay.begin_drag(lx, ly)
+        self._overlay_timer.start(OVERLAY_TIMEOUT_MS)
 
     def _on_overlay_done(self):
         self.overlay = None
