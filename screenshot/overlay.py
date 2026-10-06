@@ -176,46 +176,107 @@ class Overlay(QtWidgets.QWidget):
         self._start = None
         self._num = 0
         self._building = False
-        self._dragging_region = False
-
-        # Toolbar is a CHILD widget: same window, so clicking it never steals
-        # focus or closes the overlay.
-        self._toolbar = Toolbar(self)
-        self._toolbar.hide()
+        self._selecting = False      # left-drag region selection (own window)
+        self._hooked = False         # True while a hook-driven right-drag is active
+        self._toolbar = None         # created after first selection
 
     def showEvent(self, e):
         super().showEvent(e)
         self.raise_()
         self.activateWindow()
         self.setFocus(QtCore.Qt.OtherFocusReason)
-        if self._toolbar:
-            self._toolbar.raise_()
 
-    # ---- drag (driven by the global hook) ----
+    # ---- region selection driven by the hook (right-drag) ----
     def begin_drag(self, x, y):
-        self._dragging_region = True
+        self._hooked = True
+        self._selecting = True
         self._start = QtCore.QPoint(x, y)
         self.sel = QtCore.QRect(self._start, self._start)
         self.shapes = []
         self._num = 0
-        self._toolbar.hide()
+        if self._toolbar:
+            self._toolbar.hide()
         self.update()
 
     def update_drag(self, x, y):
-        if self._dragging_region:
+        if self._selecting:
             self.sel = QtCore.QRect(self._start, QtCore.QPoint(x, y)).normalized()
             self.update()
 
-    def end_drag(self, x, y):
-        self._dragging_region = False
+    def hook_release(self, x, y):
+        self._hooked = False
+        self._finalize_selection()
+
+    def _finalize_selection(self):
+        self._selecting = False
         self.sel = self.sel.normalized()
         if self.sel.width() > 6 and self.sel.height() > 6:
-            self._auto_copy()                 # auto-copy raw selection
+            self._auto_copy()
             self._show_toolbar()
         else:
-            self.close_overlay()
+            self.sel = QtCore.QRect()
+            self.update()
 
-    # ---- paint ----
+    # ---- selection is also possible with the overlay's own left-drag ----
+    def mousePressEvent(self, e):
+        if e.button() != QtCore.Qt.LeftButton:
+            return
+        pos = e.position().toPoint()
+
+        if not self.sel.isValid() or self.sel.isNull():
+            self._selecting = True
+            self._start = pos
+            self.sel = QtCore.QRect(pos, pos)
+            self.update()
+            return
+
+        # click outside the selection hides the toolbar
+        if not self.sel.contains(pos):
+            if self._toolbar:
+                self._toolbar.hide()
+            return
+
+        if self.mode == "text":
+            self._prompt_text(pos)
+            return
+        if self.mode == "number":
+            self._num += 1
+            self.shapes.append(Shape("number", self.color, self.pen_w, [pos, pos], str(self._num)))
+            self.update()
+            return
+        self._building = True
+        self._start = pos
+
+    def mouseMoveEvent(self, e):
+        pos = e.position().toPoint()
+        if self._selecting:
+            self.sel = QtCore.QRect(self._start, pos).normalized()
+            self.update()
+            return
+        if not self._building:
+            return
+        if self.mode == "pen":
+            if self._start is not None:
+                self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start]))
+                self._start = None
+            if self.shapes and self.shapes[-1].kind == "pen":
+                self.shapes[-1].pts.append(pos)
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() != QtCore.Qt.LeftButton:
+            return
+        pos = e.position().toPoint()
+        if self._selecting and not self._hooked:
+            self._finalize_selection()
+            return
+        if not self._building:
+            return
+        self._building = False
+        if self.mode != "pen":
+            self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos]))
+        self._start = None
+        self.update()
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.drawPixmap(0, 0, self.desk)
@@ -239,47 +300,6 @@ class Overlay(QtWidgets.QWidget):
         p.setFont(QtGui.QFont("Segoe UI", 9))
         p.drawText(rect, QtCore.Qt.AlignCenter, f"{r.width()} x {r.height()}")
 
-    # ---- mouse (left button = annotations) ----
-    def mousePressEvent(self, e):
-        if e.button() != QtCore.Qt.LeftButton:
-            return
-        pos = e.position().toPoint()
-        if self.sel.isValid() and not self.sel.contains(pos):
-            self._toolbar.hide()          # click outside -> hide toolbar
-            return
-        if self.mode == "text":
-            self._prompt_text(pos)
-            return
-        if self.mode == "number":
-            self._num += 1
-            self.shapes.append(Shape("number", self.color, self.pen_w, [pos, pos], str(self._num)))
-            self.update()
-            return
-        self._building = True
-        self._start = pos
-
-    def mouseMoveEvent(self, e):
-        if not self._building:
-            return
-        pos = e.position().toPoint()
-        if self.mode == "pen":
-            if self._start is not None:
-                self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start]))
-                self._start = None
-            if self.shapes and self.shapes[-1].kind == "pen":
-                self.shapes[-1].pts.append(pos)
-        self.update()
-
-    def mouseReleaseEvent(self, e):
-        if e.button() != QtCore.Qt.LeftButton or not self._building:
-            return
-        self._building = False
-        pos = e.position().toPoint()
-        if self.mode != "pen":
-            self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos]))
-        self._start = None
-        self.update()
-
     def keyPressEvent(self, e):
         from PySide6 import QtGui as G
         if e.key() == QtCore.Qt.Key_Escape:
@@ -294,6 +314,8 @@ class Overlay(QtWidgets.QWidget):
 
     # ---- toolbar ----
     def _show_toolbar(self):
+        if self._toolbar is None:
+            self._toolbar = Toolbar(self)
         self._toolbar.adjustSize()
         self._place_toolbar()
         self._toolbar.show()

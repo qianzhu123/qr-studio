@@ -1,15 +1,19 @@
-"""main.py - QR Shot: right-drag screenshot tool with annotations and QR decode.
+"""main.py - QR Shot: hotkey screenshot tool with annotation and QR decode.
 
-- Tray-resident, no main window.
-- Right-button DRAG on screen opens a freezed selection overlay (a plain right
-  click still shows the normal context menu).
-- Annotate, then copy / save / pin / decode as QR.
-- Decoding is local (qr-studio's qr_decode), no server needed.
+Trigger: a GLOBAL HOTKEY (default Ctrl+Alt+Q) registered with Win32
+RegisterHotKey. There is NO low-level mouse hook, so this can never stall or
+freeze mouse/keyboard input.
+
+Flow: press the hotkey -> a frozen full-screen overlay appears -> drag with the
+LEFT mouse button to select a region -> the raw region is auto-copied ->
+annotate -> Copy / Save / Pin / Decode. Click outside the selection to hide the
+toolbar; Esc cancels.
 
 Run:  python screenshot/main.py
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 
@@ -19,24 +23,26 @@ sys.path.insert(0, HERE)
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-import mouse_hook  # noqa: E402
+import hotkey as hotkey_mod  # noqa: E402
 from overlay import Overlay  # noqa: E402
+from poll_watch import RightDragWatcher  # noqa: E402
 
 try:
     from qr_decode import decode_image, trace_redirects
 except Exception:
     decode_image = trace_redirects = None
 
+HOTKEY = os.environ.get("QR_SHOT_HOTKEY", "Ctrl+Alt+Q")
 
-def _dpr_at(x: int, y: int) -> float:
-    """Device pixel ratio of the screen containing a physical point."""
-    for s in QtGui.QGuiApplication.screens():
-        g = s.geometry()
-        dpr = s.devicePixelRatio()
-        lg = QtCore.QRectF(g.x() * dpr, g.y() * dpr, g.width() * dpr, g.height() * dpr)
-        if lg.contains(x, y):
-            return dpr
-    return QtGui.QGuiApplication.primaryScreen().devicePixelRatio()
+
+def set_dpi_aware():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 class DecodePopup(QtWidgets.QWidget):
@@ -49,9 +55,9 @@ class DecodePopup(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setStyleSheet(
             "QWidget{background:#14161b;border:1px solid #333845;border-radius:12px;}"
-            "QLabel{color:#e8eaed;} QLabel.k{color:#9aa0aa;} "
-            "QPushButton{color:#e8eaed;background:transparent;border:1px solid #333845;"
-            "border-radius:8px;padding:5px 10px;} QPushButton:hover{border-color:#d7f36b;color:#d7f36b;}")
+            "QLabel{color:#e8eaed;} QPushButton{color:#e8eaed;background:transparent;"
+            "border:1px solid #333845;border-radius:8px;padding:5px 10px;}"
+            "QPushButton:hover{border-color:#d7f36b;color:#d7f36b;}")
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
@@ -60,15 +66,14 @@ class DecodePopup(QtWidgets.QWidget):
         title.setStyleSheet("color:#d7f36b;font-weight:600;")
         lay.addWidget(title)
 
+        self.url = ""
         if not res or not res.get("text"):
             lay.addWidget(QtWidgets.QLabel("No code found in the selection."))
-            self.url = ""
         else:
             self.url = res["text"] if str(res["text"]).startswith(("http://", "https://")) else ""
             meta = res.get("meta") or {}
             fmt = meta.get("format") or ""
-            kind = res.get("kind") or ""
-            head = f"{kind}" + (f"  ·  {fmt}" if fmt else "")
+            head = (res.get("kind") or "") + (f"  ·  {fmt}" if fmt else "")
             k = QtWidgets.QLabel(head)
             k.setStyleSheet("color:#9aa0aa;font-size:12px;")
             lay.addWidget(k)
@@ -89,7 +94,7 @@ class DecodePopup(QtWidgets.QWidget):
             b = QtWidgets.QPushButton(name)
             b.clicked.connect(fn)
             row.addWidget(b)
-            if name == "Trace" and not getattr(self, "url", ""):
+            if name == "Trace" and not self.url:
                 b.setEnabled(False)
         close = QtWidgets.QPushButton("Close")
         close.clicked.connect(self.close)
@@ -113,20 +118,17 @@ class DecodePopup(QtWidgets.QWidget):
         self.move(max(g.left() + 8, x), max(g.top() + 8, y))
 
     def _copy(self):
-        text = ""
-        if hasattr(self, "url") and self.url:
-            text = self.url
-        QtWidgets.QApplication.clipboard().setText(text)
+        QtWidgets.QApplication.clipboard().setText(self.url or "")
 
     def _trace(self):
-        if not getattr(self, "url", ""):
+        if not self.url:
             return
         self.trace_label.setText("tracing (HEAD only)...")
         QtWidgets.QApplication.processEvents()
         try:
             chain = trace_redirects(self.url)
-            self.trace_label.setText("\n".join(f"{h.get('status','')}  {h.get('location','')}".strip()
-                                               for h in chain) or "no redirects")
+            self.trace_label.setText("\n".join(
+                f"{h.get('status','')}  {h.get('location','')}".strip() for h in chain) or "no redirects")
         except Exception as e:
             self.trace_label.setText(f"trace failed: {e}")
 
@@ -137,64 +139,65 @@ class App(QtCore.QObject):
         self.q = qapp
         self.overlay = None
         self.popup = None
-        self._enabled = True
         self._build_tray()
-        # Observe-only hook on its own thread; Qt polls the event queue. The
-        # hook never touches Qt directly, so mouse input can never stall.
-        # swallow=True hides only the RIGHT-DRAG events from other apps, so a
-        # captured screen does not also pop a context menu or select text. A
-        # plain right click is never swallowed (threshold=10).
-        self.hook = mouse_hook.MouseHook(swallow=True, threshold=10)
-        self.hook.start()
+        # Two hook-free triggers, both safe:
+        #  - a global hotkey via RegisterHotKey
+        #  - right-button DRAG detected by POLLING GetAsyncKeyState/GetCursorPos
+        # Neither installs a low-level hook, so neither can stall input.
+        self.hotkey = hotkey_mod.Hotkey(HOTKEY)
+        self.hotkey.start()
+        self.watcher = RightDragWatcher(threshold=10)
+        self.watcher.down.connect(self.on_down)
+        self.watcher.move.connect(self.on_move)
+        self.watcher.up.connect(self.on_up)
         self._timer = QtCore.QTimer()
-        self._timer.setInterval(15)
-        self._timer.timeout.connect(self._pump)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._poll)
         self._timer.start()
-        # Watchdog: never let an overlay stay open more than 60s (self-heal if
-        # a drag is interrupted by a screen-lock, RDP drop, etc.).
-        self._watchdog = QtCore.QTimer()
-        self._watchdog.setInterval(2000)
-        self._watchdog.timeout.connect(self._check_overlay)
-        self._watchdog.start()
+        if not self.hotkey.ok:
+            QtCore.QTimer.singleShot(600, lambda: self.tray.showMessage(
+                "QR Shot", f"Hotkey {HOTKEY} could not be registered (already in use?)."))
 
-    def _check_overlay(self):
-        if self.overlay is not None and self.overlay.isVisible():
-            self._overlay_age = getattr(self, "_overlay_age", 0) + 2
-            if self._overlay_age > 60:
-                self._overlay_age = 0
-                self.overlay.close_overlay()
-        else:
-            self._overlay_age = 0
+    def _poll(self):
+        try:
+            fired = self.hotkey.fired.get_nowait()
+        except Exception:
+            return
+        if fired:
+            self.capture()
 
-    def _pump(self):
-        import time
-        now = time.monotonic()
-        while True:
-            try:
-                name, x, y, ts = self.hook.events.get_nowait()
-            except Exception:
+    # ---- hook-free right-drag -> overlay ----
+    def _logical(self, x, y):
+        dpr = 1.0
+        for s in QtGui.QGuiApplication.screens():
+            if s.geometry().contains(x, y):
+                dpr = s.devicePixelRatio() or 1.0
                 break
-            if now - ts > 2.0:      # stale backlog (e.g. after a pause): skip
-                continue
-            if not self._enabled:
-                continue
-            if name == "down":
-                self.on_down(x, y)
-            elif name == "move":
-                self.on_move(x, y)
-            elif name == "up":
-                self.on_up(x, y)
+        return int(x / dpr), int(y / dpr)
+
+    def on_down(self, x, y):
+        if self.overlay is not None and self.overlay.isVisible():
+            return
+        self.capture()
+        lx, ly = self._logical(x, y)
+        self.overlay.begin_drag(lx, ly)
+
+    def on_move(self, x, y):
+        if self.overlay and self.overlay.isVisible():
+            lx, ly = self._logical(x, y)
+            self.overlay.update_drag(lx, ly)
+
+    def on_up(self, x, y):
+        if self.overlay and self.overlay.isVisible():
+            lx, ly = self._logical(x, y)
+            self.overlay.hook_release(lx, ly)
 
     # ---- tray ----
     def _build_tray(self):
-        icon = self._make_icon()
-        self.tray = QtWidgets.QSystemTrayIcon(icon)
-        self.tray.setToolTip("QR Shot - right-drag to capture")
+        self.tray = QtWidgets.QSystemTrayIcon(self._make_icon())
+        self.tray.setToolTip(f"QR Shot - {HOTKEY} to capture")
         menu = QtWidgets.QMenu()
-        self.act_toggle = menu.addAction("Enabled (right-drag)")
-        self.act_toggle.setCheckable(True)
-        self.act_toggle.setChecked(True)
-        self.act_toggle.triggered.connect(self._set_enabled)
+        menu.addAction(f"Capture  ({HOTKEY})", self.capture)
         menu.addAction("Decode from clipboard", self.decode_clipboard)
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
@@ -215,57 +218,17 @@ class App(QtCore.QObject):
         p.end()
         return QtGui.QIcon(pm)
 
-    def _set_enabled(self, on):
-        self._enabled = on
-        if not on and self.overlay:
+    # ---- capture ----
+    def capture(self):
+        if self.overlay is not None and self.overlay.isVisible():
             self.overlay.close_overlay()
-
-    # ---- hook -> overlay ----
-    def _to_logical(self, x, y):
-        dpr = _dpr_at(x, y) or 1.0
-        vr = self.overlay.vr if self.overlay else None
-        lx, ly = x / dpr, y / dpr
-        if vr:
-            lx -= vr.left()
-            ly -= vr.top()
-        return int(lx), int(ly)
-
-    def on_down(self, x, y):
-        if self.paused():
-            return
-        self.show_overlay()
-        lx, ly = self._to_logical(x, y)
-        self.overlay.begin_drag(lx, ly)
-
-    def on_move(self, x, y):
-        if self.overlay and self.overlay.isVisible() and self._dragging_active():
-            lx, ly = self._to_logical(x, y)
-            self.overlay.update_drag(lx, ly)
-
-    def on_up(self, x, y):
-        if self.overlay and self.overlay.isVisible() and self._dragging_active():
-            lx, ly = self._to_logical(x, y)
-            self.overlay.end_drag(lx, ly)
-
-    def _dragging_active(self):
-        return self.overlay is not None and getattr(self.overlay, "_dragging_region", False)
-
-    def paused(self):
-        return not self._enabled or (self.overlay is not None and self.overlay.isVisible())
-
-    def show_overlay(self):
-        if self.overlay:
-            self.overlay.close()
         self.overlay = Overlay(self.handle_decode)
         self.overlay.finished.connect(self._on_overlay_done)
         self.overlay.show()
-        self.overlay.raise_()
-        self.overlay.activateWindow()
 
     def _on_overlay_done(self):
         self.overlay = None
 
-    # ---- decode ----
     def handle_decode(self, bgr, pixmap):
         if self.overlay:
             self.overlay.close_overlay()
@@ -295,28 +258,26 @@ class App(QtCore.QObject):
     def quit(self):
         try:
             self._timer.stop()
-            self._watchdog.stop()
-            self.hook.stop()
-            self.hook.join(timeout=1.0)
+            self.hotkey.stop()
+            self.hotkey.join(timeout=1.0)
         except Exception:
             pass
         self.q.quit()
 
 
 def _single_instance():
-    import ctypes
     k = ctypes.windll.kernel32
-    k.CreateMutexW(None, False, "Global\\QRShotSingleInstance_v1")
-    return k.GetLastError() != 183  # 183 = ERROR_ALREADY_EXISTS
+    k.CreateMutexW(None, False, "Global\\QRShotSingleInstance_v2")
+    return k.GetLastError() != 183
 
 
 def main():
     if not _single_instance():
         sys.exit(0)
-    mouse_hook.set_dpi_aware()
+    set_dpi_aware()
     qapp = QtWidgets.QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)
-    app = App(qapp)
+    App(qapp)
     sys.exit(qapp.exec())
 
 
