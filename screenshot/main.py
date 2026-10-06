@@ -1,13 +1,13 @@
-"""main.py - QR Shot: hotkey screenshot tool with annotation and QR decode.
+"""main.py - QR Shot: right-drag screenshot tool with annotation and QR decode.
 
-Trigger: a GLOBAL HOTKEY (default Ctrl+Alt+Q) registered with Win32
-RegisterHotKey. There is NO low-level mouse hook, so this can never stall or
-freeze mouse/keyboard input.
+TRIGGER: the RIGHT mouse button only, detected by POLLING GetAsyncKeyState and
+GetCursorPos. There is NO low-level mouse hook, so the tool never intercepts or
+blocks any input and therefore cannot freeze the mouse or keyboard. A plain
+right click is completely untouched (its context menu still appears).
 
-Flow: press the hotkey -> a frozen full-screen overlay appears -> drag with the
-LEFT mouse button to select a region -> the raw region is auto-copied ->
-annotate -> Copy / Save / Pin / Decode. Click outside the selection to hide the
-toolbar; Esc cancels.
+Run visibly (with a console) so it is trivially killable: close the console
+window, use the tray Quit, or end the process in Task Manager. A stuck overlay
+is also self-healed by a watchdog.
 
 Run:  python screenshot/main.py
 """
@@ -23,7 +23,6 @@ sys.path.insert(0, HERE)
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-import hotkey as hotkey_mod  # noqa: E402
 from overlay import Overlay  # noqa: E402
 from poll_watch import RightDragWatcher  # noqa: E402
 
@@ -32,7 +31,7 @@ try:
 except Exception:
     decode_image = trace_redirects = None
 
-HOTKEY = os.environ.get("QR_SHOT_HOTKEY", "Ctrl+Alt+Q")
+OVERLAY_TIMEOUT_MS = 45000      # self-close a stuck overlay
 
 
 def set_dpi_aware():
@@ -140,33 +139,23 @@ class App(QtCore.QObject):
         self.overlay = None
         self.popup = None
         self._build_tray()
-        # Two hook-free triggers, both safe:
-        #  - a global hotkey via RegisterHotKey
-        #  - right-button DRAG detected by POLLING GetAsyncKeyState/GetCursorPos
-        # Neither installs a low-level hook, so neither can stall input.
-        self.hotkey = hotkey_mod.Hotkey(HOTKEY)
-        self.hotkey.start()
+        # Right-button DRAG, detected by POLLING (no low-level hook). This can
+        # never intercept or block input, so it cannot wedge the mouse. The
+        # right button is otherwise untouched; a plain click still opens the
+        # normal context menu.
         self.watcher = RightDragWatcher(threshold=10)
         self.watcher.down.connect(self.on_down)
         self.watcher.move.connect(self.on_move)
         self.watcher.up.connect(self.on_up)
-        self._timer = QtCore.QTimer()
-        self._timer.setInterval(40)
-        self._timer.timeout.connect(self._poll)
-        self._timer.start()
-        if not self.hotkey.ok:
-            QtCore.QTimer.singleShot(600, lambda: self.tray.showMessage(
-                "QR Shot", f"Hotkey {HOTKEY} could not be registered (already in use?)."))
+        self._overlay_timer = QtCore.QTimer()
+        self._overlay_timer.setSingleShot(True)
+        self._overlay_timer.timeout.connect(self._overlay_timeout)
 
-    def _poll(self):
-        try:
-            fired = self.hotkey.fired.get_nowait()
-        except Exception:
-            return
-        if fired:
-            self.capture()
+    def _overlay_timeout(self):
+        if self.overlay and self.overlay.isVisible():
+            self.overlay.close_overlay()
 
-    # ---- hook-free right-drag -> overlay ----
+    # ---- right-drag -> overlay ----
     def _logical(self, x, y):
         dpr = 1.0
         for s in QtGui.QGuiApplication.screens():
@@ -181,6 +170,7 @@ class App(QtCore.QObject):
         self.capture()
         lx, ly = self._logical(x, y)
         self.overlay.begin_drag(lx, ly)
+        self._overlay_timer.start(OVERLAY_TIMEOUT_MS)
 
     def on_move(self, x, y):
         if self.overlay and self.overlay.isVisible():
@@ -195,10 +185,13 @@ class App(QtCore.QObject):
     # ---- tray ----
     def _build_tray(self):
         self.tray = QtWidgets.QSystemTrayIcon(self._make_icon())
-        self.tray.setToolTip(f"QR Shot - {HOTKEY} to capture")
+        self.tray.setToolTip("QR Shot - right-drag to capture")
         menu = QtWidgets.QMenu()
-        menu.addAction(f"Capture  ({HOTKEY})", self.capture)
+        menu.addAction("Capture now (or right-drag)", self.capture)
         menu.addAction("Decode from clipboard", self.decode_clipboard)
+        self.act_pause = menu.addAction("Pause watching")
+        self.act_pause.setCheckable(True)
+        self.act_pause.triggered.connect(lambda on: self.watcher.set_enabled(not on))
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
@@ -257,9 +250,8 @@ class App(QtCore.QObject):
 
     def quit(self):
         try:
-            self._timer.stop()
-            self.hotkey.stop()
-            self.hotkey.join(timeout=1.0)
+            self._overlay_timer.stop()
+            self.watcher.set_enabled(False)
         except Exception:
             pass
         self.q.quit()
@@ -275,6 +267,13 @@ def main():
     if not _single_instance():
         sys.exit(0)
     set_dpi_aware()
+    # Make the console unmistakable and closable: closing this window (X) ends
+    # the tool immediately, which works even if the overlay is stuck.
+    try:
+        ctypes.windll.kernel32.SetConsoleTitleW("QR SHOT - close this window to quit")
+    except Exception:
+        pass
+    print("QR Shot running. Close THIS window to quit. Right-drag to capture.", flush=True)
     qapp = QtWidgets.QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)
     App(qapp)
