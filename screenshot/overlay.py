@@ -71,15 +71,18 @@ def grab_desktop_pixmap() -> QtGui.QPixmap:
 # --------------------------------------------------------------------------
 
 class Shape:
-    def __init__(self, kind, color, width, pts, text=""):
+    def __init__(self, kind, color, width, pts, text="", alpha=255, text_size=16):
         self.kind = kind          # rect|arrow|pen|mosaic|number|highlight|text
         self.color = color
         self.width = width
         self.pts = pts
         self.text = text
+        self.alpha = alpha
+        self.text_size = text_size
 
     def draw(self, p: QtGui.QPainter, desk: QtGui.QPixmap):
         col = QtGui.QColor(self.color)
+        col.setAlpha(self.alpha)
         pen = QtGui.QPen(col, self.width, QtCore.Qt.SolidLine,
                          QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
         p.setPen(pen)
@@ -96,7 +99,7 @@ class Shape:
             p.drawRect(r)
         elif self.kind == "highlight":
             hl = QtGui.QColor(self.color)
-            hl.setAlpha(90)
+            hl.setAlpha(min(90, self.alpha))
             p.fillRect(r, hl)
         elif self.kind == "arrow":
             p.drawLine(x0, y0, x1, y1)
@@ -112,15 +115,18 @@ class Shape:
             p.drawPath(path)
         elif self.kind == "number":
             p.setBrush(col)
-            p.drawEllipse(QtCore.QPoint(x0, y0), 13, 13)
+            rad = 10 + self.width
+            p.drawEllipse(QtCore.QPoint(x0, y0), rad, rad)
             p.setPen(QtGui.QColor("#0d0d0d"))
-            p.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Bold))
-            p.drawText(QtCore.QRect(x0 - 13, y0 - 13, 26, 26), QtCore.Qt.AlignCenter, self.text)
+            p.setFont(QtGui.QFont("Segoe UI", max(9, rad), QtGui.QFont.Bold))
+            p.drawText(QtCore.QRect(x0 - rad, y0 - rad, rad * 2, rad * 2),
+                       QtCore.Qt.AlignCenter, self.text)
         elif self.kind == "text":
-            p.setFont(QtGui.QFont("Segoe UI", max(12, self.width * 6)))
+            p.setPen(col)
+            p.setFont(QtGui.QFont("Segoe UI", self.text_size))
             p.drawText(QtCore.QPoint(x0, y0), self.text)
         elif self.kind == "mosaic":
-            _draw_mosaic(p, desk, r, block=10)
+            _draw_mosaic(p, desk, r, block=max(6, self.width * 3))
 
 
 def _draw_mosaic(p: QtGui.QPainter, desk: QtGui.QPixmap, r: QtCore.QRect, block=10):
@@ -172,7 +178,9 @@ class Overlay(QtWidgets.QWidget):
 
         self.mode = "rect"          # active annotation tool
         self.color = "#e23b3b"
+        self.alpha = 255            # 0-255; applied to annotation color
         self.pen_w = 3
+        self.text_size = 16
         self.shapes: list[Shape] = []
         self.sel = QtCore.QRect()
         self._start = None
@@ -248,7 +256,8 @@ class Overlay(QtWidgets.QWidget):
             return
         if self.mode == "number":
             self._num += 1
-            self.shapes.append(Shape("number", self.color, self.pen_w, [pos, pos], str(self._num)))
+            self.shapes.append(Shape("number", self.color, self.pen_w, [pos, pos],
+                                     str(self._num), self.alpha, self.text_size))
             self.update()
             return
         self._building = True
@@ -264,7 +273,8 @@ class Overlay(QtWidgets.QWidget):
             return
         if self.mode == "pen":
             if self._start is not None:
-                self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start]))
+                self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start],
+                                         "", self.alpha, self.text_size))
                 self._start = None
             if self.shapes and self.shapes[-1].kind == "pen":
                 self.shapes[-1].pts.append(pos)
@@ -281,7 +291,8 @@ class Overlay(QtWidgets.QWidget):
             return
         self._building = False
         if self.mode != "pen":
-            self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos]))
+            self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos],
+                                     "", self.alpha, self.text_size))
         self._start = None
         self.update()
     def _rect_device(self, region: QtCore.QRect) -> QtCore.QRect:
@@ -350,6 +361,21 @@ class Overlay(QtWidgets.QWidget):
 
     def set_mode(self, mode):
         self.mode = mode
+
+    def set_color(self, hex_color):
+        self.color = hex_color
+
+    def set_alpha(self, a):
+        self.alpha = max(0, min(255, int(a)))
+
+    def undo(self):
+        if self.shapes:
+            self.shapes.pop()
+            self.update()
+
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec()
 
     # ---- crops / actions ----
     def _crop_device(self) -> QtGui.QPixmap:
@@ -458,12 +484,81 @@ class Overlay(QtWidgets.QWidget):
     def _prompt_text(self, pos):
         text, ok = QtWidgets.QInputDialog.getText(self, "Text", "Text:")
         if ok and text:
-            self.shapes.append(Shape("text", self.color, self.pen_w, [pos, pos], text))
+            self.shapes.append(Shape("text", self.color, self.pen_w, [pos, pos], text,
+                                     self.alpha, self.text_size))
             self.update()
 
 
+class SettingsDialog(QtWidgets.QDialog):
+    """All adjustable options for the screenshot tool, in one place."""
+
+    def __init__(self, overlay: "Overlay"):
+        super().__init__(overlay)
+        self.setWindowTitle("QR Shot - Settings")
+        self.setModal(True)
+        self.setStyleSheet("QDialog{background:#14161b;color:#e8eaed;}"
+                           "QLabel{color:#9aa0aa;} QSpinBox{background:#1a1d23;color:#e8eaed;"
+                           "border:1px solid #333845;border-radius:6px;padding:4px;}"
+                           "QPushButton{color:#e8eaed;background:transparent;border:1px solid "
+                           "#333845;border-radius:8px;padding:5px 12px;}"
+                           "QPushButton:hover{border-color:#d7f36b;color:#d7f36b;}"
+                           "QCheckBox{color:#e8eaed;}")
+        o = overlay
+        form = QtWidgets.QFormLayout(self)
+
+        self.text_size = QtWidgets.QSpinBox()
+        self.text_size.setRange(8, 96)
+        self.text_size.setValue(o.text_size)
+        form.addRow("Text size", self.text_size)
+
+        self.alpha = QtWidgets.QSpinBox()
+        self.alpha.setRange(0, 255)
+        self.alpha.setValue(o.alpha)
+        form.addRow("Annotation opacity (0-255)", self.alpha)
+
+        self.threshold = QtWidgets.QSpinBox()
+        self.threshold.setRange(4, 60)
+        self.threshold.setValue(getattr(o, "drag_threshold", 10))
+        form.addRow("Right-drag threshold (px)", self.threshold)
+
+        self.silent = QtWidgets.QCheckBox("Auto-copy raw selection on release")
+        self.silent.setChecked(True)
+        self.silent.setEnabled(False)
+        form.addRow(self.silent)
+
+        note = QtWidgets.QLabel(
+            "Copy is automatic. Enter copies the annotated result.\n"
+            "Right-click a pinned image to select again; double click to remove.")
+        note.setWordWrap(True)
+        form.addRow(note)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QtWidgets.QPushButton("Apply")
+        ok.clicked.connect(self._apply)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        form.addRow(row)
+
+    def _apply(self):
+        o = self.parent()
+        o.text_size = self.text_size.value()
+        o.alpha = self.alpha.value()
+        self.accept()
+
+
 class Toolbar(QtWidgets.QWidget):
-    """Child widget of the overlay; clicking it never steals focus."""
+    """Child widget of the overlay; clicking it never steals focus.
+
+    Tools (exclusive): rect, arrow, pen, highlight, mosaic, number, text.
+    Controls: a color swatch (fixed palette + custom), a width chooser, and a
+    Settings button. Actions: Undo, Save, Decode, Pin, Cancel.
+
+    Copy is NOT a button: the raw selection is auto-copied on release, and the
+    final (annotated) result is copied with Enter.
+    """
 
     def __init__(self, overlay: Overlay):
         super().__init__(overlay)
@@ -474,12 +569,14 @@ class Toolbar(QtWidgets.QWidget):
             "QToolButton{color:#e8eaed;background:transparent;border:none;border-radius:8px;"
             "padding:6px 9px;font-size:15px;}"
             "QToolButton:hover{background:#262a32;}"
-            "QToolButton:checked{background:#d7f36b;color:#10120a;}")
+            "QToolButton:checked{background:#d7f36b;color:#10120a;}"
+            "QLabel{color:#9aa0aa;font-size:12px;}")
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(6, 5, 6, 5)
         lay.setSpacing(2)
         grp = QtWidgets.QButtonGroup(self)
         grp.setExclusive(True)
+        self.tool_buttons = {}
         for key, tip, glyph in TOOLS:
             b = QtWidgets.QToolButton()
             b.setText(glyph)
@@ -488,12 +585,34 @@ class Toolbar(QtWidgets.QWidget):
             b.setChecked(key == overlay.mode)
             b.clicked.connect(lambda _=False, k=key: self._set_mode(k))
             grp.addButton(b)
+            self.tool_buttons[key] = b
             lay.addWidget(b)
-        lay.addSpacing(8)
-        for key, tip, glyph in [("copy", "Copy (Enter)", "⧉"),
+
+        lay.addSpacing(6)
+
+        # color swatch -> palette + custom + alpha
+        self.color_btn = QtWidgets.QToolButton()
+        self.color_btn.setToolTip("Color")
+        self.color_btn.setFixedSize(26, 26)
+        self._paint_swatch()
+        self.color_btn.clicked.connect(self._pick_color)
+        lay.addWidget(self.color_btn)
+
+        # width chooser
+        lay.addWidget(QtWidgets.QLabel("W"))
+        self.width_box = QtWidgets.QSpinBox()
+        self.width_box.setRange(1, 30)
+        self.width_box.setValue(overlay.pen_w)
+        self.width_box.setFixedWidth(52)
+        self.width_box.valueChanged.connect(self._set_width)
+        lay.addWidget(self.width_box)
+
+        lay.addSpacing(6)
+        for key, tip, glyph in [("undo", "Undo (Ctrl+Z)", "↶"),
                                 ("save", "Save", "\U0001f4be"),
                                 ("decode", "Decode code", "⌗"),
                                 ("pin", "Pin to screen", "\U0001f4cc"),
+                                ("settings", "Settings", "⚙"),
                                 ("close", "Cancel (Esc)", "✕")]:
             b = QtWidgets.QToolButton()
             b.setText(glyph)
@@ -501,12 +620,55 @@ class Toolbar(QtWidgets.QWidget):
             b.clicked.connect(lambda _=False, k=key: self._action(k))
             lay.addWidget(b)
 
+    def _paint_swatch(self):
+        self.color_btn.setStyleSheet(
+            f"QToolButton{{background:{self.o.color};border:1px solid #333845;border-radius:6px;}}")
+
     def _set_mode(self, k):
         self.o.set_mode(k)
 
+    def _set_width(self, v):
+        self.o.pen_w = int(v)
+
+    def _pick_color(self):
+        menu = QtWidgets.QMenu(self)
+        palette = ["#e23b3b", "#f5a623", "#f8e71c", "#7ed321",
+                   "#4a90e2", "#9b51e0", "#ffffff", "#000000"]
+        row = QtWidgets.QWidget()
+        rl = QtWidgets.QHBoxLayout(row)
+        rl.setContentsMargins(6, 6, 6, 6)
+        rl.setSpacing(4)
+        for c in palette:
+            b = QtWidgets.QToolButton()
+            b.setFixedSize(22, 22)
+            b.setStyleSheet(f"background:{c};border:1px solid #333845;border-radius:5px;")
+            b.clicked.connect(lambda _=False, cc=c: (self.o.set_color(cc), self._paint_swatch(),
+                                                     menu.close()))
+            rl.addWidget(b)
+        act = QtWidgets.QWidgetAction(menu)
+        act.setDefaultWidget(row)
+        menu.addAction(act)
+        menu.addSeparator()
+        menu.addAction("Transparency...", self._pick_alpha)
+        menu.addAction("Custom color...", self._pick_custom)
+        menu.exec(self.color_btn.mapToGlobal(QtCore.QPoint(0, self.color_btn.height())))
+
+    def _pick_custom(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.o.color), self, "Custom color")
+        if c.isValid():
+            self.o.set_color(c.name())
+            self._paint_swatch()
+
+    def _pick_alpha(self):
+        v, ok = QtWidgets.QInputDialog.getInt(self, "Transparency", "Alpha (0-255):",
+                                              self.o.alpha, 0, 255)
+        if ok:
+            self.o.set_alpha(v)
+
     def _action(self, k):
-        {"copy": self.o.do_copy, "save": self.o.do_save, "decode": self.o.do_decode,
-         "pin": self.o.do_pin, "close": self.o.close_overlay}[k]()
+        {"undo": self.o.undo, "save": self.o.do_save, "decode": self.o.do_decode,
+         "pin": self.o.do_pin, "settings": self.o.open_settings,
+         "close": self.o.close_overlay}[k]()
 
 
 class PinWindow(QtWidgets.QWidget):
