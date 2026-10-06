@@ -141,7 +141,10 @@ class App(QtCore.QObject):
         self._build_tray()
         # Observe-only hook on its own thread; Qt polls the event queue. The
         # hook never touches Qt directly, so mouse input can never stall.
-        self.hook = mouse_hook.MouseHook(swallow=False)
+        # swallow=True hides only the RIGHT-DRAG events from other apps, so a
+        # captured screen does not also pop a context menu or select text. A
+        # plain right click is never swallowed (threshold=10).
+        self.hook = mouse_hook.MouseHook(swallow=True, threshold=10)
         self.hook.start()
         self._timer = QtCore.QTimer()
         self._timer.setInterval(15)
