@@ -31,6 +31,50 @@ QCheckBox{color:#e8eaed;}
 """
 
 
+class PreviewCanvas(QtWidgets.QWidget):
+    """Live preview of the overlay look: outside mask + selection frame."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(150)
+        self.border_color = "#d7f36b"
+        self.mask_alpha = 110
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), QtGui.QColor("#3a4a5a"))     # mock desktop
+        for x in range(0, self.width(), 40):
+            p.setPen(QtGui.QColor("#46586a"))
+            p.drawLine(x, 0, x, self.height())
+        # outside mask
+        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, self.mask_alpha))
+        # selection window (brightened) with a closed frame + corner accents
+        r = self.rect().adjusted(40, 30, -40, -30)
+        p.drawPixmap(r, self._mock_pixmap(), self._mock_pixmap().rect())
+        col = QtGui.QColor(self.border_color)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(col, 1))
+        p.drawRect(r.adjusted(0, 0, -1, -1))
+        L = 22
+        pen = QtGui.QPen(col, 3)
+        pen.setCapStyle(QtCore.Qt.FlatCap)
+        p.setPen(pen)
+        for (px, py, dx, dy) in [(r.left(), r.top(), 1, 1), (r.right(), r.top(), -1, 1),
+                                 (r.left(), r.bottom(), 1, -1), (r.right(), r.bottom(), -1, -1)]:
+            p.drawLine(px, py, px + dx * L, py)
+            p.drawLine(px, py, px, py + dy * L)
+
+    def _mock_pixmap(self):
+        pm = QtGui.QPixmap(200, 120)
+        pm.fill(QtGui.QColor("#c9d4e0"))
+        p = QtGui.QPainter(pm)
+        p.setPen(QtGui.QColor("#8a99a8"))
+        for i in range(6):
+            p.drawLine(0, 20 * i + 10, 200, 20 * i + 10)
+        p.end()
+        return pm
+
+
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
@@ -46,13 +90,20 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # overlay look
         look = QtWidgets.QGroupBox("Overlay look")
-        lf = QtWidgets.QFormLayout(look)
+        lf = QtWidgets.QVBoxLayout(look)
+        self.preview = PreviewCanvas()
+        lf.addWidget(self.preview)
+        grid = QtWidgets.QGridLayout()
         self.border = QtWidgets.QPushButton()
         self.border.clicked.connect(self._pick_border)
-        lf.addRow("Selection border color", self.border)
+        grid.addWidget(QtWidgets.QLabel("Selection border color"), 0, 0)
+        grid.addWidget(self.border, 0, 1)
         self.mask = QtWidgets.QSpinBox()
         self.mask.setRange(0, 255)
-        lf.addRow("Outside mask opacity (0-255)", self.mask)
+        self.mask.valueChanged.connect(self._refresh_preview)
+        grid.addWidget(QtWidgets.QLabel("Outside mask opacity (0-255)"), 1, 0)
+        grid.addWidget(self.mask, 1, 1)
+        lf.addLayout(grid)
         root.addWidget(look)
 
         # toolbar composition
@@ -151,6 +202,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._set_color_btn(self.color, c["color"])
         self.alpha.setValue(int(c["alpha"]))
         self.pen_w.setValue(int(c["pen_w"]))
+        self._refresh_preview()
 
     def _item_text(self, key, visible):
         return f"{'[x]' if visible else '[ ]'}  {C.TOOL_LABELS.get(key, key)}"
@@ -160,6 +212,12 @@ class SettingsDialog(QtWidgets.QDialog):
         btn.setStyleSheet(
             f"QPushButton{{background:{hexc};color:#10120a;border:1px solid #333845;"
             f"border-radius:8px;padding:6px 12px;}}")
+        btn._hex = hexc
+
+    def _refresh_preview(self):
+        self.preview.border_color = getattr(self.border, "_hex", "#d7f36b")
+        self.preview.mask_alpha = self.mask.value()
+        self.preview.update()
 
     def _sync_tools(self):
         hidden = [k for k, cb in self._tool_check.items() if not cb.isChecked()]
@@ -184,6 +242,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if c.isValid():
             self.cfg["border_color"] = c.name()
             self._set_color_btn(self.border, c.name())
+            self._refresh_preview()
 
     def _pick_draw_color(self):
         c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.cfg["color"]), self)

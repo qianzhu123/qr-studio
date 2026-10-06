@@ -335,9 +335,25 @@ class Overlay(QtWidgets.QWidget):
             Shape(self.mode, self.color, self.pen_w, self._preview_pts,
                   "", self.alpha, self.text_size).draw(p, self.desk)
         if region.isValid() and region.width() > 0:
-            p.setPen(QtGui.QPen(QtGui.QColor(self.cfg.get("border_color", "#d7f36b")), 1))
-            p.drawRect(region)
+            self._draw_selection(p, region)
             self._draw_size_badge(p, region)
+
+    def _draw_selection(self, p, r):
+        """Closed selection frame with four corner accents."""
+        col = QtGui.QColor(self.cfg.get("border_color", "#d7f36b"))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(col, 1))
+        p.drawRect(r.adjusted(0, 0, -1, -1))          # closed 1px frame
+        # corner accents (thicker, longer)
+        L = max(14, min(28, min(r.width(), r.height()) // 3))
+        pen = QtGui.QPen(col, 3)
+        pen.setCapStyle(QtCore.Qt.FlatCap)
+        p.setPen(pen)
+        x1, y1, x2, y2 = r.left(), r.top(), r.right(), r.bottom()
+        for (px, py, dx, dy) in [(x1, y1, 1, 1), (x2, y1, -1, 1),
+                                 (x1, y2, 1, -1), (x2, y2, -1, -1)]:
+            p.drawLine(px, py, px + dx * L, py)
+            p.drawLine(px, py, px, py + dy * L)
 
     def _draw_size_badge(self, p, r):
         p.setPen(QtCore.Qt.NoPen)
@@ -698,47 +714,6 @@ class Toolbar(QtWidgets.QWidget):
          "close": self.o.close_overlay}[k]()
 
 
-class PinButtonBar(QtWidgets.QWidget):
-    """Small toolbar shown over a pinned image on hover: copy / save / close."""
-
-    def __init__(self, pin: "PinWindow"):
-        super().__init__(pin)
-        self.pin = pin
-        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            "QWidget{background:#14161bee;border:1px solid #333845;border-radius:8px;}"
-            "QToolButton{color:#e8eaed;border:none;padding:4px 8px;font-size:14px;border-radius:6px;}"
-            "QToolButton:hover{background:#262a32;}")
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(4, 3, 4, 3)
-        lay.setSpacing(2)
-        for key, tip, glyph in [("copy", "Copy", "⧉"), ("save", "Save", "\U0001f4be"),
-                                ("zoom", "Reset zoom", "1:1"), ("close", "Close", "✕")]:
-            b = QtWidgets.QToolButton()
-            b.setText(glyph)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, k=key: self._action(k))
-            lay.addWidget(b)
-        self.adjustSize()
-        self.hide()
-
-    def reposition(self):
-        w = self.width()
-        self.move(max(4, self.pin.width() - w - 6), 6)
-
-    def _action(self, k):
-        if k == "copy":
-            QtWidgets.QApplication.clipboard().setPixmap(self.pin.pm)
-        elif k == "save":
-            self.pin.save()
-        elif k == "zoom":
-            self.pin.scale = 1.0
-            self.pin._reposition()
-            self.pin.update()
-        elif k == "close":
-            self.pin.close()
-
-
 class PinWindow(QtWidgets.QWidget):
     """Floating copy of the shot, rendered as a raised 3D card.
 
@@ -779,7 +754,7 @@ class PinWindow(QtWidgets.QWidget):
         self._zoom_timer = QtCore.QTimer(self)
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.timeout.connect(self._hide_zoom)
-        self._bar = PinButtonBar(self)
+        self._grab = None
         self.setMouseTracking(True)
         self._reposition()
 
@@ -798,8 +773,6 @@ class PinWindow(QtWidgets.QWidget):
         w, h = self._logical_size()
         self.resize(w, h)
         self.move(self._origin.x() - self.MARGIN, self._origin.y() - self.MARGIN)
-        if self._bar:
-            self._bar.reposition()
 
     def _content_rect(self):
         return QtCore.QRect(self.MARGIN, self.MARGIN,
@@ -810,15 +783,21 @@ class PinWindow(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         rect = self._content_rect()
-        # drop shadow -> raised card look
+        # drop shadow -> raised card look. The card is painted 1px tighter than
+        # the widget so there is black space for the shadow to fall into.
         if self.cfg.get("pin_shadow", True):
-            for i in range(1, 10):
-                p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 26), 1))
-                p.drawRoundedRect(rect.adjusted(-i, i, i, i), 6, 6)
-        p.setPen(QtGui.QPen(QtGui.QColor(self.cfg.get("border_color", "#d7f36b")), 1))
-        p.setBrush(QtGui.QColor("#10120a"))
-        p.drawRoundedRect(rect, 6, 6)
-        p.drawPixmap(rect, self.pm)
+            for i in range(1, 12):
+                a = int(70 * (1 - i / 12) ** 1.4)
+                p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, a), 1))
+                p.drawRoundedRect(rect.adjusted(-i, -i + 2, i, i + 2), 8, 8)
+        border = QtGui.QColor(self.cfg.get("border_color", "#d7f36b"))
+        p.setPen(QtGui.QPen(border, 1))
+        p.setBrush(QtGui.QColor("#0e1016"))
+        p.drawRoundedRect(rect, 8, 8)
+        p.drawPixmap(rect.adjusted(1, 1, -1, -1), self.pm)
+        # subtle top highlight -> stronger 3D feel
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 40), 1))
+        p.drawLine(rect.left() + 8, rect.top() + 1, rect.right() - 8, rect.top() + 1)
         if self._show_zoom:
             pct = f"{int(round(self.scale * 100))}%"
             p.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Bold))
@@ -827,7 +806,7 @@ class PinWindow(QtWidgets.QWidget):
             th = fm.height() + 6
             zr = QtCore.QRect(rect.right() - tw - 6, rect.top() + 6, tw, th)
             p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtGui.QColor(0, 0, 0, 170))
+            p.setBrush(QtGui.QColor(0, 0, 0, 180))
             p.drawRoundedRect(zr, 6, 6)
             p.setPen(QtGui.QColor("#e8eaed"))
             p.drawText(zr, QtCore.Qt.AlignCenter, pct)
@@ -836,14 +815,12 @@ class PinWindow(QtWidgets.QWidget):
         self._show_zoom = False
         self.update()
 
-    # ---- hover / buttons ----
+    # ---- hover (no buttons on the pin) ----
     def enterEvent(self, e):
-        self._bar.reposition()
-        self._bar.show()
-        self._bar.raise_()
+        self.setCursor(QtCore.Qt.OpenHandCursor)
 
     def leaveEvent(self, e):
-        self._bar.hide()
+        self.setCursor(QtCore.Qt.ArrowCursor)
 
     def save(self):
         import time as _t
@@ -869,7 +846,6 @@ class PinWindow(QtWidgets.QWidget):
         new_y = int(cur.y() - rel_y * h1) - self.MARGIN
         self.resize(self.width() - w0 + w1, self.height() - h0 + h1)
         self.move(new_x, new_y)
-        self._bar.reposition()
         self._show_zoom = True
         self._zoom_timer.start(900)
         self.update()
@@ -879,20 +855,17 @@ class PinWindow(QtWidgets.QWidget):
         if e.button() == QtCore.Qt.RightButton:
             self._reopen()
             return
+        if e.button() == QtCore.Qt.LeftButton:
+            self._grab = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, e):
-        if e.buttons() & QtCore.Qt.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._grab_delta(e))
-            self._bar.reposition()
-
-    def _grab_delta(self, e):
-        if not hasattr(self, "_delta"):
-            self._delta = e.position().toPoint()
-        return self._delta
+        if e.buttons() & QtCore.Qt.LeftButton and getattr(self, "_grab", None) is not None:
+            self.move(e.globalPosition().toPoint() - self._grab)
 
     def mouseReleaseEvent(self, e):
-        if hasattr(self, "_delta"):
-            del self._delta
+        self._grab = None
+        self.setCursor(QtCore.Qt.OpenHandCursor)
 
     def mouseDoubleClickEvent(self, e):
         self.close()

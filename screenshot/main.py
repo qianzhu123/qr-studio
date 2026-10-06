@@ -25,6 +25,7 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
 from poll_watch import RightDragWatcher  # noqa: E402
+import mouse_hook  # noqa: E402
 
 try:
     from qr_decode import decode_image, trace_redirects
@@ -199,15 +200,25 @@ class App(QtCore.QObject):
         self.q = qapp
         self.overlay = None
         self.popup = None
+        self._watching = True
         self._build_tray()
-        # Right-button DRAG, detected by POLLING (no low-level hook). This can
-        # never intercept or block input, so it cannot wedge the mouse. The
-        # right button is otherwise untouched; a plain click still opens the
-        # normal context menu.
-        self.watcher = RightDragWatcher(threshold=10)
+        # Trigger = global low-level mouse hook. It detects a right-DRAG and
+        # SWALLOWS those events, which is the only reliable way to stop Windows
+        # from opening the desktop context menu on a right-drag. The hook
+        # procedure only enqueues; Qt polls the queue. A plain right click is
+        # never swallowed (the normal menu still opens).
+        self.hook = mouse_hook.MouseHook(threshold=6)
+        self.hook.start()
+        self._hook_timer = QtCore.QTimer()
+        self._hook_timer.setInterval(12)
+        self._hook_timer.timeout.connect(self._pump_hook)
+        self._hook_timer.start()
+        # Polling watcher kept as a fallback only (disabled by default).
+        self.watcher = RightDragWatcher(threshold=6)
         self.watcher.down.connect(self.on_down)
         self.watcher.move.connect(self.on_move)
         self.watcher.up.connect(self.on_up)
+        self.watcher.set_enabled(False)
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
@@ -225,6 +236,23 @@ class App(QtCore.QObject):
         except Exception:
             return
         self.quit()
+
+    def _pump_hook(self):
+        import time
+        now = time.monotonic()
+        while True:
+            try:
+                name, x, y, ts = self.hook.events.get_nowait()
+            except Exception:
+                return
+            if now - ts > 2.0 or not self._watching:
+                continue
+            if name == "down":
+                self.on_down(x, y)
+            elif name == "move":
+                self.on_move(x, y)
+            elif name == "up":
+                self.on_up(x, y)
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -287,9 +315,9 @@ class App(QtCore.QObject):
         if self.overlay and self.overlay.isVisible():
             lx, ly = self._logical(x, y)
             self.overlay.hook_release(lx, ly)
-            # A right-drag on the desktop also makes Explorer open its context
-            # menu. We do not swallow events (no hook), so dismiss that menu by
-            # targeting the menu window specifically - never our overlay.
+            # The hook swallows the drag, but a modern Win11 desktop may still
+            # have queued its menu; close it if it appears (target the popup
+            # window only, never the overlay).
             self._schedule_menu_dismiss()
 
     def _schedule_menu_dismiss(self):
@@ -316,7 +344,7 @@ class App(QtCore.QObject):
         menu.addAction("Settings...", self._open_settings)
         self.act_pause = menu.addAction("Pause watching")
         self.act_pause.setCheckable(True)
-        self.act_pause.triggered.connect(lambda on: self.watcher.set_enabled(not on))
+        self.act_pause.triggered.connect(self._set_watching)
         menu.addSeparator()
         menu.addAction(f"Quit  ({QUIT_HOTKEY})", self.quit)
         self.tray.setContextMenu(menu)
@@ -325,6 +353,10 @@ class App(QtCore.QObject):
     def _open_settings(self):
         from settings_app import SettingsDialog
         SettingsDialog().exec()
+
+    def _set_watching(self, paused):
+        self._watching = not paused
+        self.watcher.set_enabled(not paused)
 
     def _make_icon(self):
         pm = QtGui.QPixmap(64, 64)
@@ -395,7 +427,10 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
+            self._hook_timer.stop()
             self.quit_hotkey.stop()
+            self.hook.stop()
+            self.hook.join(timeout=1.0)
             self.watcher.set_enabled(False)
         except Exception:
             pass
