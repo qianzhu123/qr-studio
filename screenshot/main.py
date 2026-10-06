@@ -25,7 +25,6 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
 from poll_watch import RightDragWatcher  # noqa: E402
-import mouse_hook  # noqa: E402
 
 try:
     from qr_decode import decode_image, trace_redirects
@@ -202,23 +201,13 @@ class App(QtCore.QObject):
         self.popup = None
         self._watching = True
         self._build_tray()
-        # Trigger = global low-level mouse hook. It detects a right-DRAG and
-        # SWALLOWS those events, which is the only reliable way to stop Windows
-        # from opening the desktop context menu on a right-drag. The hook
-        # procedure only enqueues; Qt polls the queue. A plain right click is
-        # never swallowed (the normal menu still opens).
-        self.hook = mouse_hook.MouseHook(threshold=6)
-        self.hook.start()
-        self._hook_timer = QtCore.QTimer()
-        self._hook_timer.setInterval(12)
-        self._hook_timer.timeout.connect(self._pump_hook)
-        self._hook_timer.start()
-        # Polling watcher kept as a fallback only (disabled by default).
+        # Trigger = POLLING only (no low-level hook). The hook can wedge system
+        # input on this machine, so it is not used. Polling never intercepts
+        # events, so it is safe. A plain right click is never touched.
         self.watcher = RightDragWatcher(threshold=6)
         self.watcher.down.connect(self.on_down)
         self.watcher.move.connect(self.on_move)
         self.watcher.up.connect(self.on_up)
-        self.watcher.set_enabled(False)
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
@@ -236,23 +225,6 @@ class App(QtCore.QObject):
         except Exception:
             return
         self.quit()
-
-    def _pump_hook(self):
-        import time
-        now = time.monotonic()
-        while True:
-            try:
-                name, x, y, ts = self.hook.events.get_nowait()
-            except Exception:
-                return
-            if now - ts > 2.0 or not self._watching:
-                continue
-            if name == "down":
-                self.on_down(x, y)
-            elif name == "move":
-                self.on_move(x, y)
-            elif name == "up":
-                self.on_up(x, y)
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -357,7 +329,6 @@ class App(QtCore.QObject):
     def _set_watching(self, paused):
         self._watching = not paused
         self.watcher.set_enabled(not paused)
-
     def _make_icon(self):
         pm = QtGui.QPixmap(64, 64)
         pm.fill(QtCore.Qt.transparent)
@@ -427,10 +398,7 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
-            self._hook_timer.stop()
             self.quit_hotkey.stop()
-            self.hook.stop()
-            self.hook.join(timeout=1.0)
             self.watcher.set_enabled(False)
         except Exception:
             pass
