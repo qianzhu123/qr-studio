@@ -29,6 +29,12 @@ _PINS: list = []
 # Desktop capture
 # --------------------------------------------------------------------------
 
+def display_dpr() -> float:
+    """Device pixel ratio to use for the whole capture (primary screen)."""
+    s = QtGui.QGuiApplication.primaryScreen()
+    return (s.devicePixelRatio() if s else 1.0) or 1.0
+
+
 def virtual_rect() -> QtCore.QRect:
     r = QtCore.QRect()
     for s in QtGui.QGuiApplication.screens():
@@ -37,37 +43,27 @@ def virtual_rect() -> QtCore.QRect:
 
 
 def grab_desktop_pixmap() -> QtGui.QPixmap:
-    """Compose all screens into one pixmap at logical (display) resolution."""
+    """One DEVICE-resolution pixmap of all screens, carrying the DPR.
+
+    Crop this (never a second grabWindow call) to get the selection: the user
+    sees exactly this image in the overlay, so crop == what was selected. Doing
+    a fresh grabWindow is what produced the stray bottom-right captures.
+    """
+    dpr = display_dpr()
     vr = virtual_rect()
-    out = QtGui.QPixmap(vr.size())
+    out = QtGui.QPixmap(int(vr.width() * dpr), int(vr.height() * dpr))
     out.fill(QtCore.Qt.black)
     painter = QtGui.QPainter(out)
     for s in QtGui.QGuiApplication.screens():
-        pm = s.grabWindow(0)
-        g = s.geometry()
+        pm = s.grabWindow(0)                       # device pixels
+        g = s.geometry()                            # logical
         off = g.topLeft() - vr.topLeft()
-        painter.drawPixmap(off.x(), off.y(), g.width(), g.height(), pm)
+        painter.drawPixmap(int(off.x() * dpr), int(off.y() * dpr),
+                           int(g.width() * dpr), int(g.height() * dpr), pm)
     painter.end()
+    # Plain device-pixel image (dpr = 1.0). Scaling to logical space is done
+    # explicitly at draw time, so source rects are always device pixels.
     return out
-
-
-def grab_region_device(rect: QtCore.QRect) -> QtGui.QPixmap:
-    """Grab a region in DEVICE pixels for the screen containing it.
-
-    `rect` is in overlay logical coordinates. grabWindow takes device pixels,
-    so multiply the local offset/size by the screen's dpr.
-    """
-    center = rect.center()
-    for s in QtGui.QGuiApplication.screens():
-        if s.geometry().contains(center):
-            dpr = s.devicePixelRatio() or 1.0
-            local = QtCore.QRect(rect.topLeft() - s.geometry().topLeft(), rect.size())
-            pm = s.grabWindow(0,
-                              int(local.x() * dpr), int(local.y() * dpr),
-                              int(local.width() * dpr), int(local.height() * dpr))
-            pm.setDevicePixelRatio(dpr)
-            return pm
-    return QtGui.QPixmap()
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +179,7 @@ class Overlay(QtWidgets.QWidget):
         self._selecting = False      # left-drag region selection (own window)
         self._hooked = False         # True while a hook-driven right-drag is active
         self._toolbar = None         # created after first selection
+        self._dpr = display_dpr()
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -284,13 +281,21 @@ class Overlay(QtWidgets.QWidget):
             self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos]))
         self._start = None
         self.update()
+    def _rect_device(self, region: QtCore.QRect) -> QtCore.QRect:
+        """Selection (logical, overlay-local) -> crop rect in device pixels."""
+        d = self._dpr
+        return QtCore.QRect(int(region.left() * d), int(region.top() * d),
+                            int(region.width() * d), int(region.height() * d))
+
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
-        p.drawPixmap(0, 0, self.desk)
+        # desk is a plain device-pixel image; draw it scaled to the logical
+        # overlay rect so it fills the screen at the right size.
+        p.drawPixmap(self.rect(), self.desk)
         p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 110))
         region = self.sel.normalized()
         if region.isValid() and region.width() > 0:
-            p.drawPixmap(region, self.desk, region)
+            p.drawPixmap(region, self.desk, self._rect_device(region))
         for s in self.shapes:
             s.draw(p, self.desk)
         if region.isValid() and region.width() > 0:
@@ -345,22 +350,29 @@ class Overlay(QtWidgets.QWidget):
 
     # ---- crops / actions ----
     def _crop_device(self) -> QtGui.QPixmap:
-        return grab_region_device(self.sel.normalized())
+        """Crop the frozen desktop image at the selection (device pixels).
+
+        Cropping self.desk - the exact image the user sees a brightened window
+        onto - guarantees the result is what was selected. A fresh grabWindow
+        call does not, and is what produced the stray bottom-right captures.
+        """
+        region = self.sel.normalized()
+        pm = self.desk.copy(self._rect_device(region))
+        pm.setDevicePixelRatio(1.0)
+        return pm
 
     def _render_full(self) -> QtGui.QPixmap:
         """Selection at device resolution with annotations baked in."""
         r = self.sel.normalized()
-        dpr = next((s.devicePixelRatio() or 1.0 for s in QtGui.QGuiApplication.screens()
-                    if s.geometry().contains(r.center())), 1.0)
-        base = self._crop_device()       # device px, dpr set
-        base.setDevicePixelRatio(1.0)    # bake at device px, no further scaling
+        dpr = self._dpr
+        base = self._crop_device()       # device px, dpr = 1.0
         p = QtGui.QPainter(base)
-        p.scale(dpr, dpr)
+        p.scale(dpr, dpr)                # draw in logical units
         p.translate(-r.left(), -r.top())
         for s in self.shapes:
             s.draw(p, self.desk)
         p.end()
-        base.setDevicePixelRatio(dpr)
+        base.setDevicePixelRatio(1.0)    # plain image; PinWindow sizes it itself
         return base
 
     def _auto_copy(self):
@@ -460,27 +472,31 @@ class Toolbar(QtWidgets.QWidget):
 
 
 class PinWindow(QtWidgets.QWidget):
-    """Always-on-top floating image. Drag to move, wheel to zoom, double click
-    (or Esc) to close. Sized with correct device-pixel-ratio handling."""
+    """Floating thumbnail of the shot. Drag to move, wheel to zoom, double
+    click (or Esc) to close. Sized at 1:1 for the current screen's DPR."""
 
     def __init__(self, pixmap: QtGui.QPixmap):
         super().__init__()
-        self.pm = pixmap
+        self.pm = pixmap                 # plain device-pixel image, dpr = 1.0
         self.scale = 1.0
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint |
                             QtCore.Qt.Tool)
-        dpr = self._screen_dpr()
-        self.pm.setDevicePixelRatio(dpr)
-        diw = self.pm.width() / dpr
-        dih = self.pm.height() / dpr
-        self.resize(max(20, int(diw * self.scale)), max(20, int(dih * self.scale)))
+        self.setStyleSheet("PinWindow{border:1px solid #d7f36b;background:#10120a;}")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self._dpr = self._screen_dpr()
+        self._apply_size()
         self._drag = None
         self._place_near_cursor()
 
     def _screen_dpr(self):
         s = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos()) or \
             QtGui.QGuiApplication.primaryScreen()
-        return s.devicePixelRatio() or 1.0
+        return (s.devicePixelRatio() if s else 1.0) or 1.0
+
+    def _apply_size(self):
+        diw = self.pm.width() / self._dpr
+        dih = self.pm.height() / self._dpr
+        self.resize(max(16, int(diw * self.scale)), max(16, int(dih * self.scale)))
 
     def _place_near_cursor(self):
         p = QtGui.QCursor.pos()
@@ -493,13 +509,13 @@ class PinWindow(QtWidgets.QWidget):
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-        p.drawPixmap(0, 0, self.pm)   # pixmap carries dpr -> crisp 1:1 at scale 1
+        p.drawPixmap(self.rect(), self.pm)   # scale device image to the widget
 
     def wheelEvent(self, e):
-        self.scale = max(0.2, min(6.0, self.scale * (1.12 if e.angleDelta().y() > 0 else 0.89)))
-        dpr = self.pm.devicePixelRatio() or 1.0
-        self.resize(max(20, int(self.pm.width() / dpr * self.scale)),
-                    max(20, int(self.pm.height() / dpr * self.scale)))
+        if e.modifiers() & QtCore.Qt.ControlModifier or e.angleDelta().y():
+            self.scale = max(0.2, min(8.0, self.scale * (1.12 if e.angleDelta().y() > 0 else 0.89)))
+            self._apply_size()
+            e.accept()
 
     def mousePressEvent(self, e):
         self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
