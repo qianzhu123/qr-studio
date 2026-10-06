@@ -212,6 +212,24 @@ class App(QtCore.QObject):
         if self.overlay and self.overlay.isVisible():
             lx, ly = self._logical(x, y)
             self.overlay.hook_release(lx, ly)
+            # A right-drag on the desktop also makes Explorer open its context
+            # menu. We do not swallow events (no hook), so dismiss that menu by
+            # targeting the menu window specifically - never our overlay.
+            self._schedule_menu_dismiss()
+
+    def _schedule_menu_dismiss(self):
+        for delay in (60, 160, 320):
+            QtCore.QTimer.singleShot(delay, self._dismiss_menu_if_any)
+
+    def _dismiss_menu_if_any(self):
+        u = ctypes.windll.user32
+        hwnd = u.GetForegroundWindow()
+        buf = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(hwnd, buf, 64)
+        if buf.value == "#32768":        # standard Win32 popup menu class
+            # WM_KEYDOWN / WM_KEYUP of VK_ESCAPE closes the menu
+            u.PostMessageW(hwnd, 0x0100, 0x1B, 0)
+            u.PostMessageW(hwnd, 0x0101, 0x1B, 0)
 
     # ---- tray ----
     def _build_tray(self):

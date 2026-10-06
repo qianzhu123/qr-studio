@@ -191,6 +191,8 @@ class Overlay(QtWidgets.QWidget):
         self._building = False
         self._selecting = False      # left-drag region selection (own window)
         self._hooked = False         # True while a hook-driven right-drag is active
+        self._freehand_index = None  # index of the pen shape being drawn
+        self._preview_pts = None     # live preview points of a rect/arrow drag
         self._toolbar = None         # created after first selection
         self._dpr = display_dpr()
         self.reopen_handler = None   # set by the app: handler(overlay, x, y)
@@ -274,13 +276,18 @@ class Overlay(QtWidgets.QWidget):
             return
         if not self._building:
             return
-        if self.mode == "pen":
-            if self._start is not None:
-                self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start],
-                                         "", self.alpha, self.text_size))
-                self._start = None
-            if self.shapes and self.shapes[-1].kind == "pen":
-                self.shapes[-1].pts.append(pos)
+        if self.mode == "pen" and self._start is not None:
+            # start the freehand path immediately so it draws in real time
+            self.shapes.append(Shape("pen", self.color, self.pen_w, [self._start],
+                                     "", self.alpha, self.text_size))
+            self._start = None
+            self._freehand_index = len(self.shapes) - 1
+        if self.mode == "pen" and getattr(self, "_freehand_index", None) is not None:
+            self.shapes[self._freehand_index].pts.append(pos)
+            self.update()
+            return
+        # live preview of the in-progress shape (rect/arrow/highlight/...)
+        self._preview_pts = [self._start, pos]
         self.update()
 
     def mouseReleaseEvent(self, e):
@@ -296,6 +303,8 @@ class Overlay(QtWidgets.QWidget):
         if self.mode != "pen":
             self.shapes.append(Shape(self.mode, self.color, self.pen_w, [self._start, pos],
                                      "", self.alpha, self.text_size))
+        self._freehand_index = None
+        self._preview_pts = None
         self._start = None
         self.update()
     def _rect_device(self, region: QtCore.QRect) -> QtCore.QRect:
@@ -315,6 +324,10 @@ class Overlay(QtWidgets.QWidget):
             p.drawPixmap(region, self.desk, self._rect_device(region))
         for s in self.shapes:
             s.draw(p, self.desk)
+        # live preview of the shape currently being dragged
+        if self._building and getattr(self, "_preview_pts", None):
+            Shape(self.mode, self.color, self.pen_w, self._preview_pts,
+                  "", self.alpha, self.text_size).draw(p, self.desk)
         if region.isValid() and region.width() > 0:
             p.setPen(QtGui.QPen(QtGui.QColor("#d7f36b"), 1))
             p.drawRect(region)
@@ -696,7 +709,15 @@ class PinWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setStyleSheet("PinWindow{border:1px solid #d7f36b;background:#10120a;}")
         self._drag = None
+        self._show_zoom = False
+        self._zoom_timer = QtCore.QTimer(self)
+        self._zoom_timer.setSingleShot(True)
+        self._zoom_timer.timeout.connect(self._hide_zoom)
         self._reposition()
+
+    def _hide_zoom(self):
+        self._show_zoom = False
+        self.update()
 
     def _logical_size(self):
         return max(16, int(self.pm.width() / self._dpr * self.scale)), \
@@ -711,6 +732,19 @@ class PinWindow(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         p.drawPixmap(self.rect(), self.pm)
+        if self._show_zoom:
+            pct = f"{int(round(self.scale * 100))}%"
+            p.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Bold))
+            fm = QtGui.QFontMetrics(p.font())
+            tw = fm.horizontalAdvance(pct) + 16
+            th = fm.height() + 6
+            pad = 8
+            rect = QtCore.QRect(self.width() - tw - pad, pad, tw, th)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(0, 0, 0, 170))
+            p.drawRoundedRect(rect, 6, 6)
+            p.setPen(QtGui.QColor("#e8eaed"))
+            p.drawText(rect, QtCore.Qt.AlignCenter, pct)
 
     def wheelEvent(self, e):
         step = 1.12 if e.angleDelta().y() > 0 else 1 / 1.12
@@ -721,13 +755,15 @@ class PinWindow(QtWidgets.QWidget):
         cur = e.globalPosition().toPoint()
         rel_x = (cur.x() - self.x()) / max(1, self.width())
         rel_y = (cur.y() - self.y()) / max(1, self.height())
-        old_w, old_h = self.width(), self.height()
         self.scale = new_scale
         w, h = self._logical_size()
         new_x = int(cur.x() - rel_x * w)
         new_y = int(cur.y() - rel_y * h)
         self.resize(w, h)
         self.move(new_x, new_y)
+        # show the zoom percentage briefly, hide when idle
+        self._show_zoom = True
+        self._zoom_timer.start(900)
         self.update()
         e.accept()
 

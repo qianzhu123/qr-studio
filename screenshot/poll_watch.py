@@ -42,9 +42,10 @@ class RightDragWatcher(QtCore.QObject):
     move = QtCore.Signal(int, int)
     up = QtCore.Signal(int, int)
 
-    def __init__(self, threshold: int = 10, interval_ms: int = 15):
+    def __init__(self, threshold: int = 6, interval_ms: int = 8):
         super().__init__()
         self.threshold = threshold
+        self._prev_down = False
         self._armed = False       # right button currently pressed
         self._dragging = False
         self._start = (0, 0)
@@ -59,29 +60,38 @@ class RightDragWatcher(QtCore.QObject):
         if not on:
             self._armed = self._dragging = False
 
+    def _force_release(self, x, y):
+        was_dragging = self._dragging
+        self._dragging = False
+        self._armed = False
+        self._start = (0, 0)
+        if was_dragging:
+            self.up.emit(x, y)
+
     def _tick(self):
         if not self._enabled:
             return
         down_now = _down(VK_RBUTTON)
         x, y = _pos()
+
+        # Fast drags can press and release between two polls, so the button is
+        # seen up while our internal state still says a drag is active. Detect
+        # that single "up" tick and finalize instead of losing the selection.
+        if self._prev_down and not down_now and self._armed:
+            self._force_release(x, y)
+            self._prev_down = down_now
+            return
+
         if down_now and not self._armed:
-            # right button just went down
             self._armed = True
             self._dragging = False
             self._start = (x, y)
-            return
-        if down_now and self._armed and not self._dragging:
+        elif down_now and self._armed and not self._dragging:
             if abs(x - self._start[0]) > self.threshold or abs(y - self._start[1]) > self.threshold:
                 self._dragging = True
                 self.down.emit(*self._start)
                 self.move.emit(x, y)
-            return
-        if down_now and self._dragging:
+        elif down_now and self._dragging:
             self.move.emit(x, y)
-            return
-        if not down_now and self._armed:
-            self._armed = False
-            if self._dragging:
-                self._dragging = False
-                self.up.emit(x, y)
-            # plain click (no movement): do nothing, leave the context menu alone
+
+        self._prev_down = down_now
