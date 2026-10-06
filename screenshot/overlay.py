@@ -21,6 +21,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+# Strong references to pinned windows (a parentless widget with no Python
+# reference is garbage-collected the moment show() returns).
+_PINS: list = []
+
 # --------------------------------------------------------------------------
 # Desktop capture
 # --------------------------------------------------------------------------
@@ -387,7 +391,13 @@ class Overlay(QtWidgets.QWidget):
         self.on_decode(bgr, pm)
 
     def do_pin(self):
-        PinWindow(self._render_full()).show()
+        global _PINS
+        # Keep a strong reference: a parentless widget with no Python ref is
+        # garbage-collected immediately and never appears.
+        w = PinWindow(self._render_full())
+        _PINS.append(w)
+        w.show()
+        w.raise_()
         self.close_overlay()
 
     def close_overlay(self):
