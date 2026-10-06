@@ -155,6 +155,9 @@ TOOLS = [
     ("text", "Text", "A"),
 ]
 
+# Font size choices for the toolbar dropdown.
+FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64]
+
 
 class Overlay(QtWidgets.QWidget):
     finished = QtCore.Signal()
@@ -570,6 +573,10 @@ class Toolbar(QtWidgets.QWidget):
             "padding:6px 9px;font-size:15px;}"
             "QToolButton:hover{background:#262a32;}"
             "QToolButton:checked{background:#d7f36b;color:#10120a;}"
+            "QComboBox{background:#1a1d23;color:#e8eaed;border:1px solid #333845;"
+            "border-radius:6px;padding:2px 6px;}"
+            "QSpinBox{background:#1a1d23;color:#e8eaed;border:1px solid #333845;"
+            "border-radius:6px;padding:2px 6px;}"
             "QLabel{color:#9aa0aa;font-size:12px;}")
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(6, 5, 6, 5)
@@ -590,7 +597,7 @@ class Toolbar(QtWidgets.QWidget):
 
         lay.addSpacing(6)
 
-        # color swatch -> palette + custom + alpha
+        # color card -> native color picker (palette + spectrum + alpha)
         self.color_btn = QtWidgets.QToolButton()
         self.color_btn.setToolTip("Color")
         self.color_btn.setFixedSize(26, 26)
@@ -598,7 +605,7 @@ class Toolbar(QtWidgets.QWidget):
         self.color_btn.clicked.connect(self._pick_color)
         lay.addWidget(self.color_btn)
 
-        # width chooser
+        # line / shape width
         lay.addWidget(QtWidgets.QLabel("W"))
         self.width_box = QtWidgets.QSpinBox()
         self.width_box.setRange(1, 30)
@@ -606,6 +613,15 @@ class Toolbar(QtWidgets.QWidget):
         self.width_box.setFixedWidth(52)
         self.width_box.valueChanged.connect(self._set_width)
         lay.addWidget(self.width_box)
+
+        # font size as a DROPDOWN
+        lay.addWidget(QtWidgets.QLabel("T"))
+        self.font_box = QtWidgets.QComboBox()
+        self.font_box.addItems([str(s) for s in FONT_SIZES])
+        self.font_box.setCurrentText(str(overlay.text_size))
+        self.font_box.setFixedWidth(56)
+        self.font_box.currentTextChanged.connect(self._set_font)
+        lay.addWidget(self.font_box)
 
         lay.addSpacing(6)
         for key, tip, glyph in [("undo", "Undo (Ctrl+Z)", "↶"),
@@ -621,8 +637,11 @@ class Toolbar(QtWidgets.QWidget):
             lay.addWidget(b)
 
     def _paint_swatch(self):
+        c = QtGui.QColor(self.o.color)
+        c.setAlpha(self.o.alpha)
         self.color_btn.setStyleSheet(
-            f"QToolButton{{background:{self.o.color};border:1px solid #333845;border-radius:6px;}}")
+            "QToolButton{background:rgba(%d,%d,%d,%d);border:1px solid #333845;border-radius:6px;}"
+            % (c.red(), c.green(), c.blue(), c.alpha()))
 
     def _set_mode(self, k):
         self.o.set_mode(k)
@@ -630,40 +649,22 @@ class Toolbar(QtWidgets.QWidget):
     def _set_width(self, v):
         self.o.pen_w = int(v)
 
+    def _set_font(self, v):
+        try:
+            self.o.text_size = int(v)
+        except ValueError:
+            pass
+
     def _pick_color(self):
-        menu = QtWidgets.QMenu(self)
-        palette = ["#e23b3b", "#f5a623", "#f8e71c", "#7ed321",
-                   "#4a90e2", "#9b51e0", "#ffffff", "#000000"]
-        row = QtWidgets.QWidget()
-        rl = QtWidgets.QHBoxLayout(row)
-        rl.setContentsMargins(6, 6, 6, 6)
-        rl.setSpacing(4)
-        for c in palette:
-            b = QtWidgets.QToolButton()
-            b.setFixedSize(22, 22)
-            b.setStyleSheet(f"background:{c};border:1px solid #333845;border-radius:5px;")
-            b.clicked.connect(lambda _=False, cc=c: (self.o.set_color(cc), self._paint_swatch(),
-                                                     menu.close()))
-            rl.addWidget(b)
-        act = QtWidgets.QWidgetAction(menu)
-        act.setDefaultWidget(row)
-        menu.addAction(act)
-        menu.addSeparator()
-        menu.addAction("Transparency...", self._pick_alpha)
-        menu.addAction("Custom color...", self._pick_custom)
-        menu.exec(self.color_btn.mapToGlobal(QtCore.QPoint(0, self.color_btn.height())))
-
-    def _pick_custom(self):
-        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.o.color), self, "Custom color")
+        """Open the native color card (palette + spectrum + alpha)."""
+        init = QtGui.QColor(self.o.color)
+        init.setAlpha(self.o.alpha)
+        c = QtWidgets.QColorDialog.getColor(
+            init, self, "Pick color", QtWidgets.QColorDialog.ShowAlphaChannel)
         if c.isValid():
-            self.o.set_color(c.name())
+            self.o.set_color(c.name(QtGui.QColor.HexRgb))
+            self.o.set_alpha(c.alpha())
             self._paint_swatch()
-
-    def _pick_alpha(self):
-        v, ok = QtWidgets.QInputDialog.getInt(self, "Transparency", "Alpha (0-255):",
-                                              self.o.alpha, 0, 255)
-        if ok:
-            self.o.set_alpha(v)
 
     def _action(self, k):
         {"undo": self.o.undo, "save": self.o.do_save, "decode": self.o.do_decode,
