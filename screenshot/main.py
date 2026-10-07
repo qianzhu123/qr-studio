@@ -24,7 +24,7 @@ sys.path.insert(0, HERE)
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
-import raw_mouse  # noqa: E402
+from poll_watch import RightDragWatcher  # noqa: E402
 
 try:
     from qr_decode import decode_image, trace_redirects
@@ -203,21 +203,16 @@ class App(QtCore.QObject):
         self.overlay = None
         self.popup = None
         self._build_tray()
-        # Trigger = RIGHT-BUTTON DRAG, read via Win32 Raw Input: it works in the
-        # background, sees the physical button even if key-state polling misses
-        # it, and NEVER intercepts input (so it cannot freeze the mouse).
-        self.raw = raw_mouse.RawMouse(threshold=6)
-        self.raw.start()
-        self._raw_timer = QtCore.QTimer()
-        self._raw_timer.setInterval(10)
-        self._raw_timer.timeout.connect(self._pump_raw)
-        self._raw_timer.start()
+        # Trigger = RIGHT-BUTTON DRAG via lightweight polling of the global
+        # button state. A plain right click is never touched.
+        self.watcher = RightDragWatcher(threshold=6)
+        self.watcher.down.connect(self.on_down)
+        self.watcher.move.connect(self.on_move)
+        self.watcher.up.connect(self.on_up)
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
-        # Global hotkeys: Ctrl+Alt+A opens the capture overlay (recommended
-        # trigger - polling cannot see the right button on this machine, and a
-        # hook is unsafe). Ctrl+Alt+Q quits. No hook is used.
+        # Quit hotkey (RegisterHotKey only - no hook).
         self.hotkeys = Hotkeys()
         self.hotkeys.start()
         self._hk_timer = QtCore.QTimer()
@@ -232,23 +227,6 @@ class App(QtCore.QObject):
             return
         if what == "quit":
             self.quit()
-
-    def _pump_raw(self):
-        import time
-        now = time.monotonic()
-        while True:
-            try:
-                name, x, y, ts = self.raw.events.get_nowait()
-            except Exception:
-                return
-            if now - ts > 2.0:
-                continue
-            if name == "down":
-                self.on_down(x, y)
-            elif name == "move":
-                self.on_move(x, y)
-            elif name == "up":
-                self.on_up(x, y)
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -415,9 +393,8 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
-            self._raw_timer.stop()
             self.hotkeys.stop()
-            self.raw.stop()
+            self.watcher.set_enabled(False)
         except Exception:
             pass
         self.q.quit()
