@@ -60,14 +60,21 @@ class MouseHook(threading.Thread):
     def __init__(self, threshold: int = 6):
         super().__init__(daemon=True)
         self.events: "queue.Queue[tuple[str, int, int, float]]" = queue.Queue(maxsize=8192)
+        self.subs: list = []
         self.threshold = threshold
         self._dragging = False
         self._pressed = False
         self._down_pos = (0, 0)
+        self._last = 0.0
         self._proc = HOOKPROC(self._handler)
         self._hook = None
         self._tid = 0
         self._stop = threading.Event()
+
+    def add_subscriber(self, fn):
+        """Register a callback(name, x, y) invoked by the message pump (running
+        in this thread). Eliminates any polling delay."""
+        self.subs.append(fn)
 
     def _handler(self, n_code, w_param, l_param):
         if n_code < 0:
@@ -76,26 +83,38 @@ class MouseHook(threading.Thread):
         try:
             info = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             x, y = info.pt.x, info.pt.y
+            now = time.monotonic()
             if w_param in (WM_RBUTTONDOWN, WM_RBUTTONDBLCLK):
                 self._pressed = True
                 self._dragging = False
                 self._down_pos = (x, y)
-            elif w_param == WM_MOUSEMOVE and self._pressed:
-                if not self._dragging and (abs(x - self._down_pos[0]) > self.threshold
-                                           or abs(y - self._down_pos[1]) > self.threshold):
-                    self._dragging = True
-                    self._push("down", *self._down_pos)
-                if self._dragging:
-                    self._push("move", x, y)
-                    swallow = True
+                self._last = now
+            elif w_param == WM_MOUSEMOVE:
+                # NEVER swallow mouse moves: swallowing WM_MOUSEMOVE tells
+                # Windows not to move the cursor, which freezes the pointer.
+                if self._pressed:
+                    if not self._dragging and (abs(x - self._down_pos[0]) > self.threshold
+                                               or abs(y - self._down_pos[1]) > self.threshold):
+                        self._dragging = True
+                        self._push("down", *self._down_pos)
+                    if self._dragging:
+                        self._push("move", x, y)
+                # watchdog: if a drag seems stuck with no button event for a
+                # while, drop it so we never get wedged in a swallow state.
+                if self._dragging and now - self._last > 1.5:
+                    self._dragging = False
+                    self._pressed = False
+                    self._push("up", x, y)
             elif w_param == WM_RBUTTONUP:
+                self._last = now
                 self._pressed = False
                 if self._dragging:
                     self._dragging = False
                     self._push("up", x, y)
-                    swallow = True
+                    swallow = True   # suppress the desktop context menu
         except Exception:
             pass
+        # Only ever swallow right-button up (to hide the menu). Moves pass.
         return 1 if swallow else user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
 
     def _push(self, name, x, y):
@@ -103,6 +122,11 @@ class MouseHook(threading.Thread):
             self.events.put_nowait((name, x, y, time.monotonic()))
         except queue.Full:
             pass
+        for fn in self.subs:
+            try:
+                fn(name, x, y)
+            except Exception:
+                pass
 
     def run(self):
         self._tid = kernel32.GetCurrentThreadId()
