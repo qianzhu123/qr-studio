@@ -24,7 +24,7 @@ sys.path.insert(0, HERE)
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
-from poll_watch import RightDragWatcher  # noqa: E402
+import raw_mouse  # noqa: E402
 
 try:
     from qr_decode import decode_image, trace_redirects
@@ -68,33 +68,29 @@ def _parse_hotkey(combo):
 
 
 class Hotkeys(threading.Thread):
-    """Registers global hotkeys (capture + quit) via RegisterHotKey. No hook."""
+    """Registers the quit hotkey via RegisterHotKey. No hook."""
 
     def __init__(self, capture=CAPTURE_HOTKEY, quit_=QUIT_HOTKEY):
         super().__init__(daemon=True)
         self.capture = capture
         self.quit = quit_
-        self.fired = _queue.Queue(maxsize=16)   # "capture" | "quit"
+        self.fired = _queue.Queue(maxsize=16)   # "quit"
         self._tid = 0
         self.capture_ok = False
 
     def run(self):
         u = ctypes.windll.user32
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
-        mc, vc = _parse_hotkey(self.capture)
         mq, vq = _parse_hotkey(self.quit)
-        if vc is not None and u.RegisterHotKey(None, 1, mc, vc):
-            self.capture_ok = True
         if vq is not None:
             u.RegisterHotKey(None, 2, mq, vq)
         msg = _w.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY:
                 try:
-                    self.fired.put_nowait("capture" if msg.wParam == 1 else "quit")
+                    self.fired.put_nowait("quit")
                 except Exception:
                     pass
-        u.UnregisterHotKey(None, 1)
         u.UnregisterHotKey(None, 2)
 
     def stop(self):
@@ -206,15 +202,16 @@ class App(QtCore.QObject):
         self.q = qapp
         self.overlay = None
         self.popup = None
-        self._watching = True
         self._build_tray()
-        # Trigger = POLLING only (no low-level hook). The hook can wedge system
-        # input on this machine, so it is not used. Polling never intercepts
-        # events, so it is safe. A plain right click is never touched.
-        self.watcher = RightDragWatcher(threshold=6)
-        self.watcher.down.connect(self.on_down)
-        self.watcher.move.connect(self.on_move)
-        self.watcher.up.connect(self.on_up)
+        # Trigger = RIGHT-BUTTON DRAG, read via Win32 Raw Input: it works in the
+        # background, sees the physical button even if key-state polling misses
+        # it, and NEVER intercepts input (so it cannot freeze the mouse).
+        self.raw = raw_mouse.RawMouse(threshold=6)
+        self.raw.start()
+        self._raw_timer = QtCore.QTimer()
+        self._raw_timer.setInterval(10)
+        self._raw_timer.timeout.connect(self._pump_raw)
+        self._raw_timer.start()
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
@@ -233,10 +230,25 @@ class App(QtCore.QObject):
             what = self.hotkeys.fired.get_nowait()
         except Exception:
             return
-        if what == "capture":
-            self.capture()
-        elif what == "quit":
+        if what == "quit":
             self.quit()
+
+    def _pump_raw(self):
+        import time
+        now = time.monotonic()
+        while True:
+            try:
+                name, x, y, ts = self.raw.events.get_nowait()
+            except Exception:
+                return
+            if now - ts > 2.0:
+                continue
+            if name == "down":
+                self.on_down(x, y)
+            elif name == "move":
+                self.on_move(x, y)
+            elif name == "up":
+                self.on_up(x, y)
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -321,28 +333,19 @@ class App(QtCore.QObject):
     # ---- tray ----
     def _build_tray(self):
         self.tray = QtWidgets.QSystemTrayIcon(self._make_icon())
-        self.tray.setToolTip(f"QR Shot - {CAPTURE_HOTKEY} to capture")
+        self.tray.setToolTip("QR Shot - right-drag to capture")
         menu = QtWidgets.QMenu()
-        menu.addAction(f"Capture  ({CAPTURE_HOTKEY})", self.capture)
         menu.addAction("Decode from clipboard", self.decode_clipboard)
         menu.addAction("Settings...", self._open_settings)
         menu.addSeparator()
         menu.addAction(f"Quit  ({QUIT_HOTKEY})", self.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
-        self.tray.activated.connect(self._tray_clicked)
-
-    def _tray_clicked(self, reason):
-        if reason == QtWidgets.QSystemTrayIcon.Trigger:   # left click tray icon
-            self.capture()
 
     def _open_settings(self):
         from settings_app import SettingsDialog
         SettingsDialog().exec()
 
-    def _set_watching(self, paused):
-        self._watching = not paused
-        self.watcher.set_enabled(not paused)
     def _make_icon(self):
         pm = QtGui.QPixmap(64, 64)
         pm.fill(QtCore.Qt.transparent)
@@ -412,8 +415,9 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
+            self._raw_timer.stop()
             self.hotkeys.stop()
-            self.watcher.set_enabled(False)
+            self.raw.stop()
         except Exception:
             pass
         self.q.quit()
