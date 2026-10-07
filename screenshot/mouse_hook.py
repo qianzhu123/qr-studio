@@ -21,6 +21,8 @@ import time
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.windll.kernel32
 
+_DBG = None
+
 LRESULT = ctypes.c_ssize_t
 WH_MOUSE_LL = 14
 WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RBUTTONDBLCLK, WM_QUIT = \
@@ -125,6 +127,12 @@ class MouseHook(threading.Thread):
         for fn in self.subs:
             try:
                 fn(name, x, y)
+            except Exception:
+                pass
+        if _DBG:
+            try:
+                _DBG.write(f"{time.time():.3f} {name} @({x},{y})\n")
+                _DBG.flush()
             except Exception:
                 pass
 

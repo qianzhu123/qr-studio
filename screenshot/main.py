@@ -25,6 +25,11 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
 import mouse_hook  # noqa: E402
+if os.environ.get("QR_SHOT_DEBUG"):
+    try:
+        mouse_hook._DBG = open(os.path.join(HERE, "hook_events.log"), "w", encoding="utf-8")
+    except Exception:
+        pass
 from poll_watch import RightDragWatcher  # noqa: E402
 
 try:
