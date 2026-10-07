@@ -24,12 +24,6 @@ sys.path.insert(0, HERE)
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from overlay import Overlay  # noqa: E402
-import mouse_hook  # noqa: E402
-if os.environ.get("QR_SHOT_DEBUG"):
-    try:
-        mouse_hook._DBG = open(os.path.join(HERE, "hook_events.log"), "w", encoding="utf-8")
-    except Exception:
-        pass
 from poll_watch import RightDragWatcher  # noqa: E402
 
 try:
@@ -209,17 +203,10 @@ class App(QtCore.QObject):
         self.overlay = None
         self.popup = None
         self._build_tray()
-        # Trigger = RIGHT-BUTTON DRAG.
-        #  - primary: low-level hook (immediate, works on machines where polling
-        #    cannot read the right button); only right-button-UP is swallowed
-        #    (to hide the context menu), moves are never swallowed.
-        #  - fallback: polling, in case the hook is blocked by another process.
-        self.hook = mouse_hook.MouseHook(threshold=6)
-        self.hook.start()
-        self._hook_timer = QtCore.QTimer()
-        self._hook_timer.setInterval(5)
-        self._hook_timer.timeout.connect(self._pump_hook)
-        self._hook_timer.start()
+        # Trigger = RIGHT-BUTTON DRAG via POLLING (no hook). Confirmed working
+        # on this machine after a clean boot: GetAsyncKeyState sees the physical
+        # right button and reports the cursor moving during the drag. Polling
+        # never intercepts input, so it cannot freeze the mouse.
         self.watcher = RightDragWatcher(threshold=6)
         self.watcher.down.connect(self.on_down)
         self.watcher.move.connect(self.on_move)
@@ -241,22 +228,6 @@ class App(QtCore.QObject):
             return
         if what == "quit":
             self.quit()
-
-    def _pump_hook(self):
-        while True:
-            try:
-                name, x, y, ts = self.hook.events.get_nowait()
-            except Exception:
-                return
-            try:
-                if name == "down":
-                    self.on_down(x, y)
-                elif name == "move":
-                    self.on_move(x, y)
-                elif name == "up":
-                    self.on_up(x, y)
-            except Exception as e:
-                print("hook event error:", e, flush=True)
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -423,10 +394,8 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
-            self._hook_timer.stop()
             self.hotkeys.stop()
-            self.hook.stop()
-            self.hook.join(timeout=1.0)
+            self.watcher.set_enabled(False)
         except Exception:
             pass
         self.q.quit()
