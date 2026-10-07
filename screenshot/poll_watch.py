@@ -15,7 +15,11 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as w
 
+import os
 from PySide6 import QtCore
+
+_LOG = open(os.path.join(os.path.dirname(__file__), 'watcher.log'), 'w', encoding='utf-8') \
+    if os.environ.get("QR_SHOT_DEBUG") else None
 
 user32 = ctypes.windll.user32
 user32.GetAsyncKeyState.restype = ctypes.c_short
@@ -73,6 +77,10 @@ class RightDragWatcher(QtCore.QObject):
             return
         down_now = _down(VK_RBUTTON)
         x, y = _pos()
+        if _LOG:
+            _LOG.write("tick down=%s armed=%s drag=%s pos=(%d,%d)\n"
+                       % (down_now, self._armed, self._dragging, x, y))
+            _LOG.flush()
 
         # Fast drags can press and release between two polls, so the button is
         # seen up while our internal state still says a drag is active. Detect
