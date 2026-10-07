@@ -32,11 +32,12 @@ except Exception:
     decode_image = trace_redirects = None
 
 OVERLAY_TIMEOUT_MS = 45000      # self-close a stuck overlay
+CAPTURE_HOTKEY = os.environ.get("QR_SHOT_HOTKEY", "Ctrl+Alt+A")
 QUIT_HOTKEY = os.environ.get("QR_SHOT_QUIT_HOTKEY", "Ctrl+Alt+Q")
 
 
 # --------------------------------------------------------------------------
-# Minimal global hotkey (RegisterHotKey only - no hook, cannot stall input)
+# Minimal global hotkeys (RegisterHotKey only - no hook, cannot stall input)
 # --------------------------------------------------------------------------
 
 import ctypes.wintypes as _w  # noqa: E402
@@ -66,28 +67,34 @@ def _parse_hotkey(combo):
     return mods, vk
 
 
-class QuitHotkey(threading.Thread):
-    """Registers a global hotkey that quits the app. No hook, no risk."""
+class Hotkeys(threading.Thread):
+    """Registers global hotkeys (capture + quit) via RegisterHotKey. No hook."""
 
-    def __init__(self, combo=QUIT_HOTKEY):
+    def __init__(self, capture=CAPTURE_HOTKEY, quit_=QUIT_HOTKEY):
         super().__init__(daemon=True)
-        self.combo = combo
-        self.fired = _queue.Queue(maxsize=8)
+        self.capture = capture
+        self.quit = quit_
+        self.fired = _queue.Queue(maxsize=16)   # "capture" | "quit"
         self._tid = 0
+        self.capture_ok = False
 
     def run(self):
         u = ctypes.windll.user32
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
-        mods, vk = _parse_hotkey(self.combo)
-        if vk is None or not u.RegisterHotKey(None, 2, mods, vk):
-            return
+        mc, vc = _parse_hotkey(self.capture)
+        mq, vq = _parse_hotkey(self.quit)
+        if vc is not None and u.RegisterHotKey(None, 1, mc, vc):
+            self.capture_ok = True
+        if vq is not None:
+            u.RegisterHotKey(None, 2, mq, vq)
         msg = _w.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY:
                 try:
-                    self.fired.put_nowait(True)
+                    self.fired.put_nowait("capture" if msg.wParam == 1 else "quit")
                 except Exception:
                     pass
+        u.UnregisterHotKey(None, 1)
         u.UnregisterHotKey(None, 2)
 
     def stop(self):
@@ -211,20 +218,25 @@ class App(QtCore.QObject):
         self._overlay_timer = QtCore.QTimer()
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._overlay_timeout)
-        # quit hotkey (the reliable way to stop a background instance)
-        self.quit_hotkey = QuitHotkey()
-        self.quit_hotkey.start()
+        # Global hotkeys: Ctrl+Alt+A opens the capture overlay (recommended
+        # trigger - polling cannot see the right button on this machine, and a
+        # hook is unsafe). Ctrl+Alt+Q quits. No hook is used.
+        self.hotkeys = Hotkeys()
+        self.hotkeys.start()
         self._hk_timer = QtCore.QTimer()
-        self._hk_timer.setInterval(200)
+        self._hk_timer.setInterval(150)
         self._hk_timer.timeout.connect(self._poll_quit_hotkey)
         self._hk_timer.start()
 
     def _poll_quit_hotkey(self):
         try:
-            self.quit_hotkey.fired.get_nowait()
+            what = self.hotkeys.fired.get_nowait()
         except Exception:
             return
-        self.quit()
+        if what == "capture":
+            self.capture()
+        elif what == "quit":
+            self.quit()
 
     def _overlay_timeout(self):
         if self.overlay and self.overlay.isVisible():
@@ -309,18 +321,20 @@ class App(QtCore.QObject):
     # ---- tray ----
     def _build_tray(self):
         self.tray = QtWidgets.QSystemTrayIcon(self._make_icon())
-        self.tray.setToolTip("QR Shot - right-drag to capture")
+        self.tray.setToolTip(f"QR Shot - {CAPTURE_HOTKEY} to capture")
         menu = QtWidgets.QMenu()
-        menu.addAction("Capture now (or right-drag)", self.capture)
+        menu.addAction(f"Capture  ({CAPTURE_HOTKEY})", self.capture)
         menu.addAction("Decode from clipboard", self.decode_clipboard)
         menu.addAction("Settings...", self._open_settings)
-        self.act_pause = menu.addAction("Pause watching")
-        self.act_pause.setCheckable(True)
-        self.act_pause.triggered.connect(self._set_watching)
         menu.addSeparator()
         menu.addAction(f"Quit  ({QUIT_HOTKEY})", self.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
+        self.tray.activated.connect(self._tray_clicked)
+
+    def _tray_clicked(self, reason):
+        if reason == QtWidgets.QSystemTrayIcon.Trigger:   # left click tray icon
+            self.capture()
 
     def _open_settings(self):
         from settings_app import SettingsDialog
@@ -398,7 +412,7 @@ class App(QtCore.QObject):
         try:
             self._overlay_timer.stop()
             self._hk_timer.stop()
-            self.quit_hotkey.stop()
+            self.hotkeys.stop()
             self.watcher.set_enabled(False)
         except Exception:
             pass
