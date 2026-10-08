@@ -63,11 +63,12 @@ numpy and zxing-cpp power rendering and decoding.
 python backend/server.py            # http://127.0.0.1:8788
 ```
 
-On Windows you can also double-click `start-qr-studio.vbs`: it checks whether the
-server is already listening on the port, stops that exact process if so, starts a
-fresh one, then opens the browser. Only the PID owning the port is killed, so
-other `pythonw` processes are left alone. Stop it manually with
-`taskkill /IM pythonw.exe /F`.
+On Windows you can also double-click **`start-qr-studio.vbs`**: it starts the
+server in the background (no console window) on `http://127.0.0.1:8788`.
+
+To start it automatically at login, double-click **`enable-autostart.vbs`**
+(use `disable-autostart.vbs` to undo). It places a shortcut in your Startup
+folder; the server is then available after every boot.
 
 Two views: **Generate** (paste or type content, tune every parameter, watch the
 live preview and round-trip check) and **Inspect** (drop or paste an image to
