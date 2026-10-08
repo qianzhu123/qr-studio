@@ -63,12 +63,12 @@ numpy and zxing-cpp power rendering and decoding.
 python backend/server.py            # http://127.0.0.1:8788
 ```
 
-On Windows you can also double-click **`start-qr-studio.vbs`**: it starts the
+On Windows you can also double-click **`start-qr-studio.cmd`**: it starts the
 server in the background (no console window) on `http://127.0.0.1:8788`.
 
-To start it automatically at login, double-click **`enable-autostart.vbs`**
-(use `disable-autostart.vbs` to undo). It places a shortcut in your Startup
-folder; the server is then available after every boot.
+**Start at login:** copy `start-qr-studio.cmd` into your Startup folder
+(`Win+R` → `shell:startup`). It uses absolute paths, so it works from there.
+The server is then available after every boot.
 
 Two views: **Generate** (paste or type content, tune every parameter, watch the
 live preview and round-trip check) and **Inspect** (drop or paste an image to
@@ -212,7 +212,7 @@ qr-studio/
     index.html       single-page UI (Generate + Inspect)
   profiles/          saved config profiles (JSON)
   tests/             encoder equivalence, round-trip, render, pipeline tests
-  start-qr-studio.vbs  Windows one-click launcher
+  start-qr-studio.cmd  Windows launcher (background server)
 ```
 
 ## Testing
