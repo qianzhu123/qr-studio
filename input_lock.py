@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as w
+import signal
 import sys
 import threading
 import time
@@ -366,6 +367,26 @@ def main():
         blocker.uninstall()
         stop.set()
 
+    # One Ctrl+C handler that decides, right in the handler, whether this press
+    # releases. By overwriting the default handler, the FIRST Ctrl+C no longer
+    # raises KeyboardInterrupt and kills the loop - only the SECOND one releases.
+    state = {"n": 0, "done": False}
+    armed = {"on": False}
+
+    def on_sigint(signum, frame):
+        if not armed["on"]:
+            # before locking: behave normally (let it exit)
+            raise KeyboardInterrupt
+        state["n"] += 1
+        if state["n"] >= 2:
+            state["done"] = True
+            print("\n  Ctrl+C #2 - releasing", flush=True)
+            release()                 # releases immediately
+        else:
+            print("\n  Ctrl+C #1 - press Ctrl+C again to quit", flush=True)
+
+    signal.signal(signal.SIGINT, on_sigint)
+
     if not blocker.install():
         print("SetWindowsHookExW (mouse) failed:", ctypes.get_last_error())
         return 1
@@ -376,6 +397,7 @@ def main():
     th.start()
     if pinner:
         pinner.start()
+    armed["on"] = True
 
     # Watchdog: ALWAYS release after seconds + 1, even if the loop below dies.
     def watchdog():
@@ -384,28 +406,11 @@ def main():
     threading.Thread(target=watchdog, daemon=True).start()
 
     print(f"  LOCKED for {args.seconds}s. mouse-blocked:", end=" ", flush=True)
-    pressed_seen = 0
     try:
         end = time.monotonic() + args.seconds
-        while time.monotonic() < end and quit_flag[0] < 2:
+        while time.monotonic() < end and not state["done"]:
             time.sleep(0.2)
-            if kblocker and quit_flag[0] != pressed_seen:
-                pressed_seen = quit_flag[0]
-                if pressed_seen == 1:
-                    print("\n  Ctrl+C #1 received - press Ctrl+C again to quit.", end=" ", flush=True)
             print(blocker.blocked, end=" ", flush=True)
-    except KeyboardInterrupt:
-        # Ctrl+C may still reach Python directly (console handler); count it too
-        quit_flag[0] += 1
-        if quit_flag[0] < 2:
-            print("\n  Ctrl+C #1 - press again to quit", flush=True)
-            try:
-                remaining = args.seconds
-                end2 = time.monotonic() + remaining
-                while time.monotonic() < end2 and quit_flag[0] < 2:
-                    time.sleep(0.2)
-            except KeyboardInterrupt:
-                print("\n  Ctrl+C #2 - releasing", flush=True)
     finally:
         release()
         time.sleep(0.1)
