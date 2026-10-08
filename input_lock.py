@@ -37,12 +37,32 @@ For a HARD freeze of movement there is a better mechanism: ClipCursor confines
 the pointer to a rectangle. Pinning it to a 1x1 rect makes the cursor physically
 unable to move. That is what --pin uses; the hook is kept only to swallow clicks.
 
+LOCKING THE KEYBOARD SAFELY
+---------------------------
+Locking the keyboard is only acceptable if the escape route survives. This file
+passes Ctrl and C through at all times, so the console ALWAYS receives Ctrl+C
+(and every other key is swallowed while locked). Two presses are required to
+unlock early: the first prints "press Ctrl+C again to quit", the second releases.
+If you want a lock that has no escape hatch, this is deliberately not it - a
+lock you cannot leave is a trap.
+
+Exactly three independent guarantees mean a stuck state is impossible:
+  1. Ctrl and C are never swallowed (escape route intact);
+  2. a wall-clock timer releases after --seconds, with no user input;
+  3. a watchdog thread ALWAYS releases (unhook + ClipCursor(NULL)) after
+     --seconds + 1, even if the main loop crashes.
+
+The hook callback itself only counts and decides swallow-or-pass; the actual
+release happens on the main thread, so the callback stays fast.
+
 USAGE (you decide when to run it)
 ---------------------------------
-    python input_lock.py                 # locks the mouse for 3 seconds
-    python input_lock.py --seconds 5     # locks for 5 seconds
-    python input_lock.py --swallow move  # swallow only movement (clicks pass)
-    python input_lock.py --pin           # hard-freeze the pointer via ClipCursor
+    python input_lock.py                       # mouse lock, 3s
+    python input_lock.py --seconds 5           # mouse lock, 5s
+    python input_lock.py --swallow move        # movement only (clicks pass)
+    python input_lock.py --pin                 # hard-freeze the pointer
+    python input_lock.py --keyboard            # also lock keys (Ctrl+C passes)
+    python input_lock.py --keyboard --pin --seconds 6
 
 Nothing here runs on import; everything happens inside main(), which only runs
 when this file is executed directly.
@@ -85,6 +105,26 @@ user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, w.WPARAM, w.LPA
 user32.CallNextHookEx.restype = LRESULT
 user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
 user32.UnhookWindowsHookEx.restype = w.BOOL
+
+# --- keyboard (WH_KEYBOARD_LL) ---
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+VK_ESCAPE = 0x1B
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_C = 0x43
+
+KEYPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, w.WPARAM, w.LPARAM)
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, w.HINSTANCE, w.DWORD]
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", w.DWORD), ("scanCode", w.DWORD), ("flags", w.DWORD),
+                ("time", w.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
+
 
 MOVE_AND_CLICK = (WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP,
                   WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
@@ -148,6 +188,73 @@ class MouseBlocker:
             user32.DispatchMessageW(ctypes.byref(msg))
 
     def stop(self):
+        if self._tid:
+            user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+
+
+class KeyboardBlocker(threading.Thread):
+    """Installs a WH_KEYBOARD_LL hook that swallows every key EXCEPT Ctrl and C.
+
+    Ctrl and C always pass, so the console receives Ctrl+C and the escape route
+    survives. Two Ctrl+C presses are counted here; the second sets `quit_flag`
+    (a plain list) so the main thread can release. The callback only counts and
+    returns - it never blocks.
+    """
+
+    def __init__(self, quit_flag: list):
+        super().__init__(daemon=True)
+        self.quit_flag = quit_flag     # shared [int] counter of Ctrl+C presses
+        self._ctrl_down = False
+        self.blocked = 0
+        self._proc = KEYPROC(self._handler)
+        self._hook = None
+        self._tid = 0
+        self._stop = threading.Event()
+
+    def _handler(self, n_code, msg, l_param):
+        if n_code < 0:
+            return user32.CallNextHookEx(self._hook, n_code, msg, l_param)
+        try:
+            info = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = info.vkCode
+            down = msg in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            up = msg in (WM_KEYUP, WM_SYSKEYUP)
+            # track Ctrl so we can let Ctrl+C through
+            if vk in (VK_LCONTROL, VK_RCONTROL):
+                self._ctrl_down = down
+                return user32.CallNextHookEx(self._hook, n_code, msg, l_param)
+            # allow C only while Ctrl is held -> that is Ctrl+C, our escape
+            if vk == VK_C and self._ctrl_down:
+                if down:
+                    self.quit_flag[0] += 1
+                return user32.CallNextHookEx(self._hook, n_code, msg, l_param)
+            if vk == VK_ESCAPE:
+                # do not let Esc be a silent second escape; it is swallowed too
+                pass
+            # everything else is swallowed while locked
+            self.blocked += 1
+            return 1
+        except Exception:
+            pass
+        return user32.CallNextHookEx(self._hook, n_code, msg, l_param)
+
+    def run(self):
+        self._tid = kernel32.GetCurrentThreadId()
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, None, 0)
+        if not self._hook:
+            return
+        msg = w.MSG()
+        while not self._stop.is_set():
+            r = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if r == 0 or r == -1:
+                break
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        user32.UnhookWindowsHookEx(self._hook)
+        self._hook = None
+
+    def stop(self):
+        self._stop.set()
         if self._tid:
             user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
 
@@ -227,47 +334,83 @@ def main():
     ap.add_argument("--pin", action="store_true",
                     help="also hard-freeze the pointer with ClipCursor "
                          "(movement becomes impossible, not just slowed)")
+    ap.add_argument("--keyboard", action="store_true",
+                    help="also lock the keyboard; Ctrl and C still pass so the "
+                         "console can always receive Ctrl+C (two presses unlock)")
     args = ap.parse_args()
 
     kinds = {"all"} if args.swallow == "all" else {args.swallow}
     blocker = MouseBlocker(kinds)
     pinner = CursorPinner() if args.pin else None
+    quit_flag = [0]                       # Ctrl+C press counter (shared)
+    kblocker = KeyboardBlocker(quit_flag) if args.keyboard else None
 
     print("QR Studio / input_lock demo")
-    print(f"  swallowing: {args.swallow}   duration: {args.seconds}s"
-          f"   pin pointer: {bool(args.pin)}")
-    print("  escape: it releases by itself; Ctrl+C also aborts.")
+    print(f"  swallowing mouse: {args.swallow}   duration: {args.seconds}s"
+          f"   pin pointer: {bool(args.pin)}   keyboard lock: {bool(args.keyboard)}")
+    print("  escape: auto-release at the end; Ctrl+C twice to quit early.")
     if input("  type GO and press Enter to arm (Ctrl+C to cancel): ").strip().upper() != "GO":
         print("cancelled.")
         return 0
 
     stop = threading.Event()
+
+    def release():
+        """Single release path, safe to call more than once."""
+        if pinner:
+            pinner.stop()
+        if kblocker:
+            kblocker.stop()
+            kblocker.join(timeout=1.0)
+        blocker.stop()
+        blocker.uninstall()
+        stop.set()
+
     if not blocker.install():
-        print("SetWindowsHookExW failed:", ctypes.get_last_error())
+        print("SetWindowsHookExW (mouse) failed:", ctypes.get_last_error())
         return 1
+    if kblocker:
+        kblocker.start()
 
     th = threading.Thread(target=blocker.run_until, args=(stop,), daemon=True)
     th.start()
     if pinner:
         pinner.start()
-    print(f"  LOCKED for {args.seconds}s (mouse only). Blocked so far:", end=" ", flush=True)
 
+    # Watchdog: ALWAYS release after seconds + 1, even if the loop below dies.
+    def watchdog():
+        time.sleep(args.seconds + 1.0)
+        release()
+    threading.Thread(target=watchdog, daemon=True).start()
+
+    print(f"  LOCKED for {args.seconds}s. mouse-blocked:", end=" ", flush=True)
+    pressed_seen = 0
     try:
         end = time.monotonic() + args.seconds
-        while time.monotonic() < end:
-            time.sleep(0.25)
+        while time.monotonic() < end and quit_flag[0] < 2:
+            time.sleep(0.2)
+            if kblocker and quit_flag[0] != pressed_seen:
+                pressed_seen = quit_flag[0]
+                if pressed_seen == 1:
+                    print("\n  Ctrl+C #1 received - press Ctrl+C again to quit.", end=" ", flush=True)
             print(blocker.blocked, end=" ", flush=True)
     except KeyboardInterrupt:
-        print("\n  Ctrl+C - releasing early", flush=True)
+        # Ctrl+C may still reach Python directly (console handler); count it too
+        quit_flag[0] += 1
+        if quit_flag[0] < 2:
+            print("\n  Ctrl+C #1 - press again to quit", flush=True)
+            try:
+                remaining = args.seconds
+                end2 = time.monotonic() + remaining
+                while time.monotonic() < end2 and quit_flag[0] < 2:
+                    time.sleep(0.2)
+            except KeyboardInterrupt:
+                print("\n  Ctrl+C #2 - releasing", flush=True)
     finally:
-        # The release path takes no user input: release clip, unhook, stop pump.
-        if pinner:
-            pinner.stop()
-        blocker.stop()
-        blocker.uninstall()
-        stop.set()
-        th.join(timeout=1.0)
-        print(f"\n  RELEASED. total events blocked: {blocker.blocked}")
+        release()
+        time.sleep(0.1)
+        kb = kblocker.blocked if kblocker else 0
+        print(f"\n  RELEASED. mouse events blocked: {blocker.blocked}  keys blocked: {kb}")
     return 0
 
 
