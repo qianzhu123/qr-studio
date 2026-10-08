@@ -28,7 +28,7 @@ path never touches the keyboard.
 WHY A HOOK ALONE ONLY *SLOWS* INPUT
 -----------------------------------
 Swallowing events in a WH_MOUSE_LL hook is not fully reliable: Windows enforces
-a LowLevelHooksTimeout (HKCU\Control Panel\Desktop\LowLevelHooksTimeout, ~300ms
+a LowLevelHooksTimeout (HKCU\\Control Panel\\Desktop\\LowLevelHooksTimeout, ~300ms
 by default) and will pass an event through - or drop your hook entirely - if the
 callback is late (Python GIL/GC jitter is enough). Some drivers also move the
 cursor below the hook. The result is stutter, not a hard lock.
