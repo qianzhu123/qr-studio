@@ -35,16 +35,27 @@ STYLE = """
 QWidget{background:#0c0d10;color:#e8eaed;font-size:13px;}
 QGroupBox{border:1px solid #262a32;border-radius:10px;margin-top:14px;padding:12px;}
 QGroupBox::title{subcontrol-origin:margin;left:12px;color:#9aa0aa;}
-QSpinBox{background:#1a1d23;border:1px solid #333845;border-radius:8px;padding:5px 8px;color:#e8eaed;}
+QSpinBox,QDoubleSpinBox{background:#1a1d23;border:1px solid #333845;border-radius:8px;padding:5px 8px;color:#e8eaed;}
 QCheckBox{color:#e8eaed;}
 QLabel#count{font-size:44px;font-weight:600;color:#d7f36b;}
 QPushButton{background:transparent;border:1px solid #333845;border-radius:10px;padding:9px 18px;color:#e8eaed;}
 QPushButton:hover{border-color:#d7f36b;color:#d7f36b;}
 QPushButton#arm{background:#d7f36b;color:#10120a;border-color:#d7f36b;font-weight:600;font-size:15px;}
 QPushButton#arm:disabled{background:#2a2f38;color:#6b7280;border-color:#2a2f38;}
+QPushButton#preset{padding:6px 12px;font-size:12px;}
 """
 
-MAX_SECONDS = 60      # hard cap so a typo cannot lock the machine for long
+
+def hms_to_seconds(h=0, m=0, s=0.0):
+    return h * 3600 + m * 60 + s
+
+
+def seconds_to_hms(total: float):
+    total = max(0.0, float(total))
+    h = int(total // 3600)
+    m = int((total % 3600) // 60)
+    s = total % 60
+    return h, m, s
 
 
 class Window(QtWidgets.QWidget):
@@ -52,7 +63,7 @@ class Window(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle("Input Lock - demo")
         self.setStyleSheet(STYLE)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
 
         self._mouse = None
         self._pinner = None
@@ -64,7 +75,7 @@ class Window(QtWidgets.QWidget):
         self._build()
 
         self._tick = QtCore.QTimer(self)
-        self._tick.setInterval(100)
+        self._tick.setInterval(16)          # ~60fps so the 3-decimal timer is lively
         self._tick.timeout.connect(self._on_tick)
 
     def _build(self):
@@ -81,17 +92,40 @@ class Window(QtWidgets.QWidget):
         form.addRow(self.cb_mouse)
         form.addRow(self.cb_move)
         form.addRow(self.cb_keys)
-
-        self.secs = QtWidgets.QSpinBox()
-        self.secs.setRange(1, MAX_SECONDS)
-        self.secs.setValue(3)
-        self.secs.setSuffix("  s")
-        form.addRow("Lock for", self.secs)
         root.addWidget(opts)
 
+        # ---- duration: h / m / s with sub-second precision ----
+        dur = QtWidgets.QGroupBox("Lock for")
+        df = QtWidgets.QVBoxLayout(dur)
+        row = QtWidgets.QHBoxLayout()
+        self.sp_h = QtWidgets.QSpinBox(); self.sp_h.setRange(0, 99); self.sp_h.setSuffix(" h")
+        self.sp_m = QtWidgets.QSpinBox(); self.sp_m.setRange(0, 59); self.sp_m.setSuffix(" m")
+        self.sp_s = QtWidgets.QDoubleSpinBox(); self.sp_s.setRange(0.0, 59.999)
+        self.sp_s.setDecimals(3); self.sp_s.setSingleStep(0.1); self.sp_s.setSuffix(" s")
+        self.sp_s.setValue(3.0)
+        for wdg in (self.sp_h, self.sp_m, self.sp_s):
+            wdg.valueChanged.connect(self._refresh_total)
+            row.addWidget(wdg)
+        df.addLayout(row)
+
+        presets = QtWidgets.QHBoxLayout()
+        for label, secs in [("3s", 3), ("5s", 5), ("10s", 10), ("30s", 30),
+                            ("1m", 60), ("5m", 300)]:
+            b = QtWidgets.QPushButton(label)
+            b.setObjectName("preset")
+            b.clicked.connect(lambda _=False, s=secs: self._set_seconds(s))
+            presets.addWidget(b)
+        presets.addStretch(1)
+        df.addLayout(presets)
+
+        self.total = QtWidgets.QLabel("")
+        self.total.setStyleSheet("color:#9aa0aa;")
+        df.addWidget(self.total)
+        root.addWidget(dur)
+
         note = QtWidgets.QLabel(
-            "Releases automatically when the countdown ends (plus a 1s watchdog). "
-            "Nothing needs to be clicked to unlock.")
+            "No upper limit. Releases automatically when the countdown ends "
+            "(plus a 1s watchdog). Nothing needs to be clicked to unlock.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#9aa0aa;")
         root.addWidget(note)
@@ -111,14 +145,38 @@ class Window(QtWidgets.QWidget):
         self.status.setAlignment(QtCore.Qt.AlignCenter)
         root.addWidget(self.status)
 
+        self._refresh_total()
+
+    # ---- duration helpers ----
+    def _set_seconds(self, total):
+        h, m, s = seconds_to_hms(total)
+        self.sp_h.setValue(h)
+        self.sp_m.setValue(m)
+        self.sp_s.setValue(s)
+        self._refresh_total()
+
+    def _seconds(self) -> float:
+        return hms_to_seconds(self.sp_h.value(), self.sp_m.value(), self.sp_s.value())
+
+    def _refresh_total(self):
+        total = self._seconds()
+        h, m, s = seconds_to_hms(total)
+        self.total.setText(f"= {int(total)} s"
+                           + (f"  ({h}h {m}m {s:.3f}s)" if h or m else ""))
+
     # ---- arm / release ----
     def _on_arm(self):
         if self._armed:
             return
-        secs = self.secs.value()
+        secs = self._seconds()
+        if secs <= 0:
+            QtWidgets.QMessageBox.warning(self, "Nothing to lock", "Set a duration above zero.")
+            return
+        h, m, s = seconds_to_hms(secs)
+        pretty = (f"{h}h " if h else "") + (f"{m}m " if m or h else "") + f"{s:.3f}s"
         if QtWidgets.QMessageBox.question(
                 self, "Arm the lock?",
-                f"Input will be locked for {secs} seconds, then released "
+                f"Input will be locked for {pretty} ({secs:.3f}s), then released "
                 f"automatically.\n\nKeep this window open.\n\nProceed?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
             return
@@ -180,7 +238,13 @@ class Window(QtWidgets.QWidget):
         if left <= 0:
             self._release()
             return
-        self.count.setText(f"{left:0.1f}")
+        h, m, s = seconds_to_hms(left)
+        if h:
+            self.count.setText(f"{h}:{m:02d}:{s:06.3f}")
+        elif m:
+            self.count.setText(f"{m}:{s:06.3f}")
+        else:
+            self.count.setText(f"{s:.3f}")
         self.status.setText("LOCKED - releases automatically")
 
     def closeEvent(self, e):
